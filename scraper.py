@@ -2,6 +2,7 @@
 
 import json
 import string
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -14,7 +15,14 @@ from urllib3.util.retry import Retry
 BASE_URL = "https://www.atgames.net/leaderboards"
 TITLES_AFTER_URL = f"{BASE_URL}/titles/after"
 SCORES_JSON_URL = f"{BASE_URL}/scores-json"
-DATA_DIR = Path(__file__).parent / "data"
+
+# When packaged with PyInstaller, store data next to the executable
+if getattr(sys, "frozen", False):
+    _APP_DIR = Path(sys.executable).parent
+else:
+    _APP_DIR = Path(__file__).parent
+
+DATA_DIR = _APP_DIR / "data"
 SCORES_FILE = DATA_DIR / "scores.json"
 
 MAX_WORKERS_GAMES = 5

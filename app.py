@@ -2,6 +2,7 @@
 
 import io
 import json
+import sys
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -10,9 +11,9 @@ from tkinter import ttk, messagebox
 import requests
 from PIL import Image, ImageTk
 
-from scraper import load_data, scrape_all, save_data
+from scraper import load_data, scrape_all, save_data, _APP_DIR
 
-SETTINGS_FILE = Path(__file__).parent / "data" / "settings.json"
+SETTINGS_FILE = _APP_DIR / "data" / "settings.json"
 
 # -- Color Scheme (Pinball / Arcade) --
 BG_DARK = "#0a0a1a"
