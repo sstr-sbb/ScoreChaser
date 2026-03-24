@@ -59,6 +59,10 @@ The scraper uses the ATGames ArcadeNet API:
 
 The GUI is built with tkinter using a custom `ColorTable` widget that provides per-column foreground colors through synchronized treeviews.
 
+## AI Disclosure
+
+This project was built with the help of [Claude Code](https://claude.ai/claude-code), an AI coding assistant by Anthropic.
+
 ## License
 
 This project is not affiliated with ATGames. All leaderboard data is publicly available on atgames.net.
