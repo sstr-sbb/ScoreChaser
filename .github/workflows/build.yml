@@ -1,0 +1,77 @@
+name: Build Executables
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: PinballScores-Windows
+            ext: .exe
+          - os: ubuntu-latest
+            artifact: PinballScores-Linux
+            ext: ""
+          - os: macos-latest
+            artifact: PinballScores-macOS
+            ext: ""
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build executable
+        run: pyinstaller PinballScores.spec
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/PinballScores${{ matrix.ext }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          cd artifacts
+          mv PinballScores-Windows/PinballScores.exe PinballScores-Windows.exe
+          mv PinballScores-Linux/PinballScores PinballScores-Linux
+          mv PinballScores-macOS/PinballScores PinballScores-macOS
+          chmod +x PinballScores-Linux PinballScores-macOS
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/PinballScores-Windows.exe
+            artifacts/PinballScores-Linux
+            artifacts/PinballScores-macOS
+          generate_release_notes: true
