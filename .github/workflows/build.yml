@@ -61,17 +61,17 @@ jobs:
 
       - name: Prepare release files
         run: |
-          cd artifacts
-          mv PinballScores-Windows/PinballScores.exe PinballScores-Windows.exe
-          mv PinballScores-Linux/PinballScores PinballScores-Linux
-          mv PinballScores-macOS/PinballScores PinballScores-macOS
-          chmod +x PinballScores-Linux PinballScores-macOS
+          mkdir -p release
+          cp artifacts/PinballScores-Windows/PinballScores.exe release/PinballScores-Windows.exe
+          cp artifacts/PinballScores-Linux/PinballScores release/PinballScores-Linux
+          cp artifacts/PinballScores-macOS/PinballScores release/PinballScores-macOS
+          chmod +x release/PinballScores-Linux release/PinballScores-macOS
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/PinballScores-Windows.exe
-            artifacts/PinballScores-Linux
-            artifacts/PinballScores-macOS
+            release/PinballScores-Windows.exe
+            release/PinballScores-Linux
+            release/PinballScores-macOS
           generate_release_notes: true
