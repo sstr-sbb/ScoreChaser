@@ -14,9 +14,11 @@ A desktop app for tracking your standings on [ATGames ArcadeNet](https://www.atg
 - **Auto-refresh** on startup; data is cached locally for instant access
 - **Username persistence** across sessions
 
-## Screenshot
+## Screenshots
 
-*(coming soon)*
+![All Games overview with score thresholds](screenshots/allScores.png)
+
+![User rankings with per-game scores and targets](screenshots/UserScore.png)
 
 ## Download
 
