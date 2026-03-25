@@ -11,7 +11,8 @@ from tkinter import ttk, messagebox
 import requests
 from PIL import Image, ImageTk
 
-from scraper import load_data, scrape_all, save_data, _APP_DIR
+from scraper import (load_data, scrape_all, save_data, _APP_DIR,
+                     fetch_tournaments, fetch_tournament_scores)
 
 SETTINGS_FILE = _APP_DIR / "data" / "settings.json"
 
@@ -66,30 +67,39 @@ class ColorTable:
                   or (col_id, header_text, width, anchor, stretch, fg_color, font)
         """
         self._trees: list[ttk.Treeview] = []
+        self._col_frames: list[tk.Frame] = []
+        self._col_defs = col_defs
         self._row_count = 0
         self._sel_idx = -1
         self._select_callbacks: list = []
+        self._values: list[tuple] = []
+        self._row_tags: list[list[str]] = []
 
         # Scrollbar (right side of everything)
         scroll = ttk.Scrollbar(parent, orient=tk.VERTICAL)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         # Body frame — each column is a vertical frame with header + treeview
-        body = tk.Frame(parent, bg=BG_PANEL)
-        body.pack(fill=tk.BOTH, expand=True)
+        self._body = tk.Frame(parent, bg=BG_PANEL)
+        self._body.pack(fill=tk.BOTH, expand=True)
+
+        # Measure font for auto-sizing
+        import tkinter.font as tkfont
+        self._measure_font = tkfont.Font(family=FONT_FAMILY, size=10)
+        self._header_font = tkfont.Font(family=FONT_FAMILY, size=9, weight="bold")
 
         for col_def in col_defs:
             _, text, width, anchor, stretch, fg = col_def[:6]
             font = col_def[6] if len(col_def) > 6 else None
 
             # --- Column container (header + tree stacked vertically) ---
+            col_frame = tk.Frame(self._body, width=width, bg=BG_PANEL)
             if stretch:
-                col_frame = tk.Frame(body, bg=BG_PANEL)
                 col_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
             else:
-                col_frame = tk.Frame(body, width=width, bg=BG_PANEL)
                 col_frame.pack(side=tk.LEFT, fill=tk.Y)
                 col_frame.pack_propagate(False)
+            self._col_frames.append(col_frame)
 
             # Header label at top of column
             tk.Label(col_frame, text=text, fg=fg, bg=BG_HEADER, height=1,
@@ -122,6 +132,28 @@ class ColorTable:
         scroll.configure(command=self._scroll_all)
         self._trees[0].configure(yscrollcommand=self._on_yscroll)
 
+    def auto_resize(self, padding: int = 16):
+        """Resize non-stretch columns to fit content, stretch columns fill rest."""
+        for i, col_def in enumerate(self._col_defs):
+            stretch = col_def[4]
+            if stretch:
+                continue
+
+            header_text = col_def[1]
+            # Measure header width
+            max_w = self._header_font.measure(header_text)
+
+            # Measure all data values
+            for row in self._values:
+                val = str(row[i]) if i < len(row) else ""
+                w = self._measure_font.measure(val)
+                if w > max_w:
+                    max_w = w
+
+            new_width = max_w + padding
+            self._col_frames[i].configure(width=new_width)
+            self._trees[i].column("v", width=new_width)
+
     def _scroll_all(self, *args):
         for t in self._trees:
             t.yview(*args)
@@ -153,32 +185,50 @@ class ColorTable:
             cb()
 
     def _set_selection(self, idx):
-        # Deselect previous
+        # Deselect previous — restore original per-column tags
         if 0 <= self._sel_idx < self._row_count:
-            tag = "even" if self._sel_idx % 2 == 0 else "odd"
-            for t in self._trees:
-                t.item(t.get_children()[self._sel_idx], tags=(tag,))
+            orig_tags = self._row_tags[self._sel_idx]
+            for i, t in enumerate(self._trees):
+                t.item(t.get_children()[self._sel_idx], tags=(orig_tags[i],))
 
         self._sel_idx = idx
 
-        # Select new
+        # Select new — use _sel variant of each column's tag
         if 0 <= idx < self._row_count:
-            tag = "even_sel" if idx % 2 == 0 else "odd_sel"
-            for t in self._trees:
+            orig_tags = self._row_tags[idx]
+            for i, t in enumerate(self._trees):
                 items = t.get_children()
-                t.item(items[idx], tags=(tag,))
+                t.item(items[idx], tags=(f"{orig_tags[i]}_sel",))
                 t.see(items[idx])
 
-    def insert(self, values):
-        tag = "even" if self._row_count % 2 == 0 else "odd"
+    def configure_column_tag(self, col_idx: int, tag_name: str, **kw):
+        """Configure a tag on a specific column's treeview.
+        Also register a _sel variant with the same foreground but selection background."""
+        if 0 <= col_idx < len(self._trees):
+            self._trees[col_idx].tag_configure(tag_name, **kw)
+            # Create a selection variant preserving foreground
+            sel_kw = {k: v for k, v in kw.items() if k == "foreground"}
+            sel_kw["background"] = SEL_BG
+            self._trees[col_idx].tag_configure(f"{tag_name}_sel", **sel_kw)
+
+    def insert(self, values, col_tags: dict[int, str] | None = None):
+        """Insert a row. col_tags: optional {col_index: tag_name} overrides."""
+        base_tag = "even" if self._row_count % 2 == 0 else "odd"
+        row_tags = []
         for i, t in enumerate(self._trees):
             val = values[i] if i < len(values) else ""
+            tag = col_tags.get(i, base_tag) if col_tags else base_tag
             t.insert("", tk.END, values=(val,), tags=(tag,))
+            row_tags.append(tag)
+        self._values.append(values)
+        self._row_tags.append(row_tags)
         self._row_count += 1
 
     def delete_all(self):
         for t in self._trees:
             t.delete(*t.get_children())
+        self._values.clear()
+        self._row_tags.clear()
         self._row_count = 0
         self._sel_idx = -1
 
@@ -372,7 +422,7 @@ class PinballScoresApp:
 
         # --- Tab 0: All Games (always visible, rebuilt on search change) ---
         self.allgames_frame = ttk.Frame(self.notebook)
-        self.notebook.add(self.allgames_frame, text=" ALL GAMES ")
+        self.notebook.add(self.allgames_frame, text=" ALL TABLES ")
         self.allgames_table: ColorTable | None = None
         self._allgames_has_user_cols = False
 
@@ -380,13 +430,13 @@ class PinballScoresApp:
         self.ranked_frame = ttk.Frame(self.notebook)
 
         self.ranked_table = ColorTable(self.ranked_frame, [
-            ("game",  "GAME",       200, "w",      True,  NEON_PINK),
+            ("game",  "TABLE",       200, "w",      False, NEON_PINK),
             ("rank",  "RANK",        50, "center", False, NEON_PINK),
             ("date",  "DATE",        85, "center", False, NEON_PINK),
-            ("score", "USER SCORE", 105, "center", False, NEON_YELLOW),
-            ("high",  "HIGHSCORE",  105, "center", False, GOLD),
-            ("top10", "TOP 10",     105, "center", False, NEON_GREEN),
-            ("top50", "TOP 50",     105, "center", False, NEON_CYAN),
+            ("score", "USER SCORE", 105, "center", True, NEON_YELLOW),
+            ("high",  "HIGHSCORE",  105, "center", True, GOLD),
+            ("top10", "TOP 10",     105, "center", True, NEON_GREEN),
+            ("top50", "TOP 50",     105, "center", True, NEON_CYAN),
         ])
         self.ranked_table.bind_select(lambda: self._on_left_select("ranked"))
 
@@ -394,12 +444,55 @@ class PinballScoresApp:
         self.unranked_frame = ttk.Frame(self.notebook)
 
         self.unranked_table = ColorTable(self.unranked_frame, [
-            ("game", "GAME", 230, "w", True, NEON_PINK),
-            *[(c, t, w, "center", False, fg) for c, t, w, fg in score_col_defs],
+            ("game", "TABLE", 230, "w", False, NEON_PINK),
+            *[(c, t, w, "center", True, fg) for c, t, w, fg in score_col_defs],
         ])
         self.unranked_table.bind_select(lambda: self._on_left_select("unranked"))
 
         self._user_tabs_visible = False
+
+        # --- Tab 3: Tournaments (always visible, drill-down) ---
+        self.tournament_outer = ttk.Frame(self.notebook)
+        self.notebook.add(self.tournament_outer, text=" TOURNAMENTS ")
+
+        # Tournament header bar (hidden initially, shows name + dates + back)
+        self.tournament_back_frame = tk.Frame(self.tournament_outer, bg=BG_HEADER,
+                                               padx=6, pady=4)
+        self.tournament_back_btn = tk.Button(
+            self.tournament_back_frame, text="←",
+            fg=NEON_CYAN, bg=BG_WIDGET, activeforeground=NEON_YELLOW,
+            activebackground="#2a2a5e", font=(FONT_FAMILY, 11, "bold"),
+            bd=0, padx=6, pady=0, cursor="hand2",
+            command=self._tournament_go_back,
+        )
+        self.tournament_back_btn.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.tournament_info_label = tk.Label(
+            self.tournament_back_frame, text="", fg=NEON_PINK, bg=BG_HEADER,
+            font=(FONT_FAMILY, 10, "bold"), anchor="w", cursor="hand2",
+        )
+        self.tournament_info_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.tournament_info_label.bind("<Button-1>", lambda _: self._on_tournament_header_click())
+
+        # Container for swapping between list and game views
+        self.tournament_container = ttk.Frame(self.tournament_outer)
+        self.tournament_container.pack(fill=tk.BOTH, expand=True)
+
+        # Tournament list view (rebuilt on search change)
+        self.tournament_list_frame = ttk.Frame(self.tournament_container)
+        self.tournament_list_frame.pack(fill=tk.BOTH, expand=True)
+        self.tournament_table: ColorTable | None = None
+        self._tournament_list_has_user = False
+
+        # Tournament games view (created on demand)
+        self.tournament_games_frame = ttk.Frame(self.tournament_container)
+        self.tournament_games_table: ColorTable | None = None
+        self._tournament_game_ids: list[int] = []  # game_ids in current view
+        self._tournament_game_scores: list[dict] = []  # scores per game
+
+        self._tournaments: list[dict] = []
+        self._tournament_scores_cache: dict[int, list[dict]] = {}
+        self._current_tournament: dict | None = None
 
         # Right: boxart + full top 100 detail
         right = ttk.Frame(paned)
@@ -413,7 +506,7 @@ class PinballScoresApp:
         self.boxart_label.pack(side=tk.LEFT, padx=(0, 8))
         self._boxart_placeholder = None  # will hold a blank image
 
-        self.detail_label = ttk.Label(header, text="SELECT A GAME", style="Title.TLabel")
+        self.detail_label = ttk.Label(header, text="SELECT A TABLE", style="Title.TLabel")
         self.detail_label.pack(side=tk.LEFT, anchor=tk.W)
 
         detail_cols = ("rank", "userName", "initials", "score", "hardware", "date")
@@ -436,6 +529,7 @@ class PinballScoresApp:
         self.detail_tree.tag_configure("top10", background=TOP10_BG, foreground=NEON_GREEN)
         self.detail_tree.tag_configure("top50", background=TOP50_BG, foreground=NEON_CYAN)
         self.detail_tree.tag_configure("rank1", background="#2a1a00", foreground=GOLD)
+        self.detail_tree.tag_configure("game_sep", background=BG_HEADER, foreground=NEON_PINK)
 
         # Right-click context menu on detail tree
         self._ctx_menu = tk.Menu(self.root, tearoff=0, bg=BG_WIDGET, fg=FG_DEFAULT,
@@ -507,12 +601,15 @@ class PinballScoresApp:
             self.status_var.set("No data. Loading...")
         # Auto-refresh on startup
         self.root.after(100, self._start_scrape)
+        self.root.after(200, self._load_tournaments)
 
     def _on_search(self):
         search = self.search_var.get().strip().lower()
         self._populate_tabs(search)
+        if self._tournaments:
+            self._populate_tournaments(self._tournaments)
         self.detail_tree.delete(*self.detail_tree.get_children())
-        self.detail_label.config(text="SELECT A GAME")
+        self.detail_label.config(text="SELECT A TABLE")
         self.boxart_label.config(image="", width=0)
 
     def _rebuild_allgames_table(self, with_user: bool):
@@ -530,11 +627,11 @@ class PinballScoresApp:
             ("top100","TOP 100",   110, NEON_ORANGE),
         ]
 
-        cols = [("game", "GAME", 200 if with_user else 230, "w", True, NEON_PINK)]
+        cols = [("game", "TABLE", 200 if with_user else 230, "w", False, NEON_PINK)]
         if with_user:
             cols.append(("rank", "RANK", 65, "center", False, NEON_PINK))
-            cols.append(("uscore", "USER SCORE", 105, "center", False, NEON_YELLOW))
-        cols.extend([(c, t, w, "center", False, fg) for c, t, w, fg in score_col_defs])
+            cols.append(("uscore", "USER SCORE", 105, "center", True, NEON_YELLOW))
+        cols.extend([(c, t, w, "center", True, fg) for c, t, w, fg in score_col_defs])
 
         self.allgames_table = ColorTable(self.allgames_frame, cols)
         self.allgames_table.bind_select(lambda: self._on_left_select("allgames"))
@@ -595,7 +692,8 @@ class PinballScoresApp:
                 ))
             self._allgames_game_ids.append(game_id)
 
-        self.notebook.tab(0, text=f" ALL GAMES ({len(self.data)}) ")
+        self.allgames_table.auto_resize()
+        self.notebook.tab(0, text=f" ALL TABLES ({len(self.data)}) ")
 
         if not has_search:
             self._remove_user_tabs()
@@ -651,6 +749,9 @@ class PinballScoresApp:
                 _format_score(th["top100"]),
             ))
             self._unranked_game_ids.append(game_id)
+
+        self.ranked_table.auto_resize()
+        self.unranked_table.auto_resize()
 
         self.notebook.tab(self.ranked_frame,
                           text=f" {username}'s Rankings ({len(ranked)}) ")
@@ -750,6 +851,357 @@ class PinballScoresApp:
                         fraction = max(0.0, (idx - 5) / total)
                         self.detail_tree.yview_moveto(fraction)
                     break
+
+    def _load_tournaments(self):
+        """Load tournament list and pre-fetch scores in background."""
+        def _fetch():
+            try:
+                tournaments = fetch_tournaments()
+                # Pre-fetch scores for all tournaments
+                for t in tournaments:
+                    tid = t["id"]
+                    if tid not in self._tournament_scores_cache:
+                        try:
+                            scores = fetch_tournament_scores(tid)
+                            self._tournament_scores_cache[tid] = scores
+                        except Exception:
+                            pass
+                self.root.after(0, lambda: self._populate_tournaments(tournaments))
+            except Exception:
+                pass
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _rebuild_tournament_table(self, with_user: bool):
+        """Rebuild tournament list table with or without user columns."""
+        if self.tournament_table is not None and self._tournament_list_has_user == with_user:
+            return
+        for w in self.tournament_list_frame.winfo_children():
+            w.destroy()
+
+        score_cols = [
+            ("high",  "HIGHSCORE", 100, GOLD),
+            ("top10", "TOP 10",    100, NEON_GREEN),
+            ("top50", "TOP 50",    100, NEON_CYAN),
+        ]
+
+        cols = [
+            ("status", "STATUS", 60, "center", False, NEON_GREEN),
+            ("name",   "TOURNAMENT", 200, "w", False, NEON_PINK),
+            ("dates",  "DATES", 140, "center", False, FG_DEFAULT),
+        ]
+        if with_user:
+            cols.append(("rank", "RANK", 50, "center", False, NEON_PINK))
+            cols.append(("uscore", "USER SCORE", 100, "center", True, NEON_YELLOW))
+        cols.extend([(c, t, w, "center", True, fg) for c, t, w, fg in score_cols])
+
+        self.tournament_table = ColorTable(self.tournament_list_frame, cols)
+        self.tournament_table.bind_select(self._on_tournament_select)
+        self._tournament_list_has_user = with_user
+
+    def _populate_tournaments(self, tournaments: list[dict]):
+        self._tournaments = tournaments
+        search = self.search_var.get().strip().lower()
+        has_user = bool(search)
+
+        self._rebuild_tournament_table(with_user=has_user)
+        self.tournament_table.delete_all()
+
+        # Configure status-specific tags on the status column (index 0)
+        self.tournament_table.configure_column_tag(0, "active",
+            foreground=NEON_GREEN, background=ROW_EVEN)
+        self.tournament_table.configure_column_tag(0, "expired",
+            foreground="#ff4444", background=ROW_EVEN)
+        self.tournament_table.configure_column_tag(0, "upcoming",
+            foreground=NEON_YELLOW, background=ROW_EVEN)
+
+        for t in tournaments:
+            status = t.get("status", "")
+            name = t.get("name", "")
+            start = t.get("start", "")[:10]
+            end = t.get("end", "")[:10]
+            dates = f"{start} — {end}" if start else ""
+
+            # Get aggregated scores across all tournament games
+            tid = t["id"]
+            cached = self._tournament_scores_cache.get(tid, [])
+            all_scores: list[dict] = []
+            for g in cached:
+                all_scores.extend(g.get("scores", []))
+
+            # Thresholds from combined scores (sorted by score descending)
+            all_scores.sort(key=lambda s: int(s.get("score", "0")), reverse=True)
+            high = _format_score(all_scores[0]["score"]) if all_scores else "—"
+            top10 = _format_score(all_scores[9]["score"]) if len(all_scores) >= 10 else "—"
+            top50 = _format_score(all_scores[49]["score"]) if len(all_scores) >= 50 else "—"
+
+            status_tag = status.lower() if status.lower() in ("active", "expired", "upcoming") else "even"
+
+            if has_user:
+                # Find user's best rank across tournament games
+                user_rank = None
+                user_score = None
+                for g in cached:
+                    for s in g.get("scores", []):
+                        if search == s.get("userName", "").lower():
+                            if user_rank is None or s["rank"] < user_rank:
+                                user_rank = s["rank"]
+                                user_score = s["score"]
+
+                self.tournament_table.insert((
+                    status, name, dates,
+                    str(user_rank) if user_rank else "unranked",
+                    _format_score(user_score) if user_score else "",
+                    high, top10, top50,
+                ), col_tags={0: status_tag})
+            else:
+                self.tournament_table.insert((
+                    status, name, dates, high, top10, top50,
+                ), col_tags={0: status_tag})
+
+        count = len([t for t in tournaments if t.get("status") == "Active"])
+        self.tournament_table.auto_resize()
+        self._update_tournament_tab_title(count)
+
+    def _update_tournament_tab_title(self, active_count: int = 0):
+        for i in range(self.notebook.index("end")):
+            if self.notebook.tab(i, "text").strip().startswith("TOURNAMENTS"):
+                self.notebook.tab(i, text=f" TOURNAMENTS ({active_count} active) ")
+                break
+
+    def _on_tournament_select(self):
+        """Drill down: tournament selected -> show its games."""
+        idx = self.tournament_table.selection_index()
+        if idx < 0 or idx >= len(self._tournaments):
+            return
+        tournament = self._tournaments[idx]
+        tid = tournament["id"]
+        self._current_tournament = tournament
+
+        # Check cache
+        if tid in self._tournament_scores_cache:
+            self._show_tournament_games(tournament, self._tournament_scores_cache[tid])
+            return
+
+        # Fetch scores in background
+        self.detail_label.config(text="Loading...")
+        self.detail_tree.delete(*self.detail_tree.get_children())
+
+        def _fetch():
+            try:
+                game_scores = fetch_tournament_scores(tid)
+                self._tournament_scores_cache[tid] = game_scores
+                self.root.after(0, lambda: self._show_tournament_games(tournament, game_scores))
+            except Exception:
+                pass
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _show_tournament_games(self, tournament: dict, game_scores: list[dict]):
+        """Show the games of a tournament with score thresholds."""
+        self._tournament_game_scores = game_scores
+
+        # Build the games table (with user columns if search active)
+        for w in self.tournament_games_frame.winfo_children():
+            w.destroy()
+
+        search = self.search_var.get().strip().lower()
+        has_user = bool(search)
+
+        score_cols = [
+            ("high",  "HIGHSCORE", 110, GOLD),
+            ("top10", "TOP 10",    110, NEON_GREEN),
+            ("top50", "TOP 50",    110, NEON_CYAN),
+        ]
+
+        cols = [("game", "TABLE", 230, "w", False, NEON_PINK)]
+        if has_user:
+            cols.append(("rank", "RANK", 55, "center", False, NEON_PINK))
+            cols.append(("uscore", "USER SCORE", 105, "center", True, NEON_YELLOW))
+        cols.extend([(c, t, w, "center", True, fg) for c, t, w, fg in score_cols])
+
+        self.tournament_games_table = ColorTable(self.tournament_games_frame, cols)
+        self.tournament_games_table.bind_select(self._on_tournament_game_select)
+
+        for game in game_scores:
+            scores = game.get("scores", [])
+            by_rank = {s["rank"]: s["score"] for s in scores if s.get("rank")}
+            th_high = by_rank.get(1, "")
+            th_top10 = by_rank.get(10, "")
+            th_top50 = by_rank.get(50, "") if len(scores) >= 50 else (
+                scores[-1]["score"] if scores else ""
+            )
+
+            if has_user:
+                user_entry = None
+                for s in scores:
+                    if search == s.get("userName", "").lower():
+                        user_entry = s
+                        break
+                rank_str = str(user_entry["rank"]) if user_entry else "unranked"
+                score_str = _format_score(user_entry["score"]) if user_entry else ""
+                self.tournament_games_table.insert((
+                    game["name"], rank_str, score_str,
+                    _format_score(th_high),
+                    _format_score(th_top10),
+                    _format_score(th_top50),
+                ))
+            else:
+                self.tournament_games_table.insert((
+                    game["name"],
+                    _format_score(th_high),
+                    _format_score(th_top10),
+                    _format_score(th_top50),
+                ))
+
+        self.tournament_games_table.auto_resize()
+
+        # Update header with tournament name + dates + user info
+        start = tournament.get("start", "")[:10]
+        end = tournament.get("end", "")[:10]
+        dates = f"  ({start} — {end})" if start else ""
+        user_info = ""
+        if search:
+            for g in game_scores:
+                for s in g.get("scores", []):
+                    if search == s.get("userName", "").lower():
+                        user_info = f"  |  Rank #{s['rank']} — {_format_score(s['score'])} ({g['name']})"
+                        break
+                if user_info:
+                    break
+            if not user_info:
+                user_info = "  |  unranked"
+        self.tournament_info_label.config(text=f"{tournament['name']}{dates}{user_info}")
+
+        # Switch view: hide list, show header + games
+        self.tournament_list_frame.pack_forget()
+        self.tournament_back_frame.pack(fill=tk.X, before=self.tournament_container)
+        self.tournament_games_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Show overlay and combined scores on the right
+        overlay = tournament.get("overlay", "")
+        if overlay:
+            self._load_boxart(overlay)
+        else:
+            self.boxart_label.config(image="", width=0)
+        self._show_tournament_combined_detail(tournament, game_scores)
+
+    def _on_tournament_game_select(self):
+        """Show full leaderboard for selected tournament game."""
+        idx = self.tournament_games_table.selection_index()
+        if idx < 0 or idx >= len(self._tournament_game_scores):
+            return
+        game = self._tournament_game_scores[idx]
+        self._show_tournament_game_detail(game)
+
+    def _show_tournament_combined_detail(self, tournament: dict, game_scores: list[dict]):
+        """Show all tournament game scores combined in the detail tree."""
+        self.detail_label.config(text=tournament["name"].upper())
+        self.detail_tree.delete(*self.detail_tree.get_children())
+        search = self.search_var.get().strip().lower()
+
+        for game in game_scores:
+            # Game name separator
+            self.detail_tree.insert("", tk.END, values=(
+                "", f"── {game['name']} ──", "", "", "", "",
+            ), tags=("game_sep",))
+
+            for s in game["scores"]:
+                rank = s.get("rank", 999)
+                tags: tuple = ()
+                if search and search == s.get("userName", "").lower():
+                    tags = ("highlight",)
+                elif rank == 1:
+                    tags = ("rank1",)
+                elif rank <= 10:
+                    tags = ("top10",)
+
+                self.detail_tree.insert("", tk.END, values=(
+                    rank,
+                    s.get("userName", ""),
+                    s.get("signature", ""),
+                    _format_score(s.get("score", "0")),
+                    _hw_name(s.get("hardware", "")),
+                    "",
+                ), tags=tags)
+
+        # Scroll to user if found
+        if search:
+            for item in self.detail_tree.get_children():
+                if "highlight" in self.detail_tree.item(item, "tags"):
+                    self.detail_tree.selection_set(item)
+                    children = self.detail_tree.get_children()
+                    total = len(children)
+                    i = self.detail_tree.index(item)
+                    if total > 0:
+                        fraction = max(0.0, (i - 5) / total)
+                        self.detail_tree.yview_moveto(fraction)
+                    break
+
+    def _show_tournament_game_detail(self, game: dict):
+        """Show a single tournament game's scores in the right detail tree."""
+        self.detail_label.config(text=game["name"].upper())
+
+        boxart = game.get("boxart", "")
+        if boxart:
+            self._load_boxart(boxart)
+
+        self.detail_tree.delete(*self.detail_tree.get_children())
+        search = self.search_var.get().strip().lower()
+
+        for s in game["scores"]:
+            rank = s.get("rank", 999)
+            tags: tuple = ()
+            if search and search == s.get("userName", "").lower():
+                tags = ("highlight",)
+            elif rank == 1:
+                tags = ("rank1",)
+            elif rank <= 10:
+                tags = ("top10",)
+
+            self.detail_tree.insert("", tk.END, values=(
+                rank,
+                s.get("userName", ""),
+                s.get("signature", ""),
+                _format_score(s.get("score", "0")),
+                _hw_name(s.get("hardware", "")),
+                "",
+            ), tags=tags)
+
+        if search:
+            children = self.detail_tree.get_children()
+            total = len(children)
+            for item in children:
+                if "highlight" in self.detail_tree.item(item, "tags"):
+                    self.detail_tree.selection_set(item)
+                    i = self.detail_tree.index(item)
+                    if total > 0:
+                        fraction = max(0.0, (i - 5) / total)
+                        self.detail_tree.yview_moveto(fraction)
+                    break
+
+    def _on_tournament_header_click(self):
+        """Click on tournament name -> show combined scores on right."""
+        if self._current_tournament:
+            tid = self._current_tournament["id"]
+            if tid in self._tournament_scores_cache:
+                self._show_tournament_combined_detail(
+                    self._current_tournament,
+                    self._tournament_scores_cache[tid],
+                )
+                overlay = self._current_tournament.get("overlay", "")
+                if overlay:
+                    self._load_boxart(overlay)
+
+    def _tournament_go_back(self):
+        """Go back from games view to tournament list."""
+        self.tournament_games_frame.pack_forget()
+        self.tournament_back_frame.pack_forget()
+        self.tournament_list_frame.pack(fill=tk.BOTH, expand=True)
+        self._current_tournament = None
+        self.detail_tree.delete(*self.detail_tree.get_children())
+        self.detail_label.config(text="SELECT A TABLE")
+        self.boxart_label.config(image="", width=0)
 
     def _show_progress(self):
         self.progress_label.pack(side=tk.LEFT, padx=(12, 4))

@@ -1,6 +1,7 @@
 """Scraper for ATGames ArcadeNet leaderboards."""
 
 import json
+import re
 import string
 import sys
 import threading
@@ -15,6 +16,8 @@ from urllib3.util.retry import Retry
 BASE_URL = "https://www.atgames.net/leaderboards"
 TITLES_AFTER_URL = f"{BASE_URL}/titles/after"
 SCORES_JSON_URL = f"{BASE_URL}/scores-json"
+TOURNAMENT_LIST_URL = "https://acnet-lb.atgames.net/tournament/list"
+TOURNAMENT_SCORES_URL = f"{BASE_URL}/highscore/top50"
 
 # When packaged with PyInstaller, store data next to the executable
 if getattr(sys, "frozen", False):
@@ -226,6 +229,90 @@ def scrape_all(progress_callback=None) -> dict:
     return all_data
 
 
+def fetch_tournaments() -> list[dict]:
+    """Fetch tournament list from the API."""
+    resp = SESSION.get(TOURNAMENT_LIST_URL)
+    resp.raise_for_status()
+    data = resp.json()
+    tournaments = data.get("tournaments", [])
+    # Return only active and recent expired (last 5)
+    active = [t for t in tournaments if t.get("status") == "Active"]
+    expired = [t for t in tournaments if t.get("status") == "Expired"]
+    return active + expired[:5]
+
+
+def _parse_tournament_scores_html(html: str) -> list[dict]:
+    """Parse tournament top50 HTML page into structured data per game."""
+    games = []
+    # Split by game items
+    items = re.split(r'<div class="item">', html)
+
+    for item in items[1:]:  # skip content before first item
+        # Extract game name from title div
+        name_match = re.search(r'<div class="title"><span>\d+</span>(.*?)</div>', item)
+        game_name = name_match.group(1).strip() if name_match else "Unknown"
+
+        # Extract boxart
+        boxart_match = re.search(r'<img src="(https://assets\.atgames\.net[^"]*)"', item)
+        boxart = boxart_match.group(1) if boxart_match else ""
+
+        # Extract score rows from tbody
+        scores = []
+        rows = re.findall(r'<tr>\s*<th scope="row">(\d+)</th>(.*?)</tr>', item, re.DOTALL)
+        for rank_str, row_html in rows:
+            # Username
+            name_m = re.search(r'<td class="td-02"[^>]*>(.*?)</td>', row_html)
+            username = name_m.group(1).strip() if name_m else ""
+
+            # Hardware - check title attribute first, then hidden <b>, then raw text
+            hw = ""
+            hw_m = re.search(r'title="([^"]*)"', row_html)
+            if hw_m:
+                hw = hw_m.group(1)
+            elif re.search(r'<b hidden>(.*?)</b>', row_html):
+                hw = re.search(r'<b hidden>(.*?)</b>', row_html).group(1)
+            else:
+                hw_raw = re.search(r'<td class="td-03"[^>]*>(.*?)</td>', row_html)
+                if hw_raw:
+                    hw = re.sub(r'<[^>]+>', '', hw_raw.group(1)).strip()
+
+            # Initials
+            ini_m = re.search(r'<td class="td-04"[^>]*>(.*?)</td>', row_html)
+            initials = ini_m.group(1).strip() if ini_m else ""
+
+            # Score - last td, remove commas
+            score_m = re.search(
+                r'<td[^>]*>([0-9][0-9,]*)</td>\s*$', row_html, re.DOTALL
+            )
+            score_val = score_m.group(1).replace(",", "") if score_m else "0"
+
+            scores.append({
+                "rank": int(rank_str),
+                "userName": username,
+                "signature": initials,
+                "score": score_val,
+                "hardware": hw,
+            })
+
+        games.append({
+            "name": game_name,
+            "boxart": boxart,
+            "scores": scores,
+        })
+
+    return games
+
+
+def fetch_tournament_scores(tournament_id: int,
+                            session: requests.Session | None = None) -> list[dict]:
+    """Fetch and parse top50 scores for a tournament."""
+    s = session or SESSION
+    url = f"{TOURNAMENT_SCORES_URL}/{tournament_id}"
+    resp = s.get(url)
+    resp.raise_for_status()
+    return _parse_tournament_scores_html(resp.text)
+
+
 def save_data(data: dict) -> None:
     """Save scraped data to disk."""
     DATA_DIR.mkdir(exist_ok=True)
@@ -237,8 +324,12 @@ def load_data() -> dict | None:
     """Load previously scraped data from disk."""
     if not SCORES_FILE.exists():
         return None
-    with open(SCORES_FILE, encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(SCORES_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+            return data if data else None
+    except (json.JSONDecodeError, ValueError):
+        return None
 
 
 if __name__ == "__main__":
