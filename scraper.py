@@ -19,6 +19,10 @@ SCORES_JSON_URL = f"{BASE_URL}/scores-json"
 TOURNAMENT_LIST_URL = "https://acnet-lb.atgames.net/tournament/list"
 TOURNAMENT_SCORES_URL = f"{BASE_URL}/highscore/top50"
 
+ARCADENET_BACKEND = "https://www.atgames.net/arcadenet/backend"
+PERSONAL_SCORES_URL = f"{ARCADENET_BACKEND}/d2d/arcade/v2/leaderboards/personal"
+ARCADENET_LOGIN_URL = "https://www.atgames.net/arcadenet/auth/login"
+
 # When packaged with PyInstaller, store data next to the executable
 if getattr(sys, "frozen", False):
     _APP_DIR = Path(sys.executable).parent
@@ -27,6 +31,7 @@ else:
 
 DATA_DIR = _APP_DIR / "data"
 SCORES_FILE = DATA_DIR / "scores.json"
+SETTINGS_FILE = DATA_DIR / "settings.json"
 
 MAX_WORKERS_GAMES = 5
 MAX_WORKERS_SCORES = 10
@@ -330,6 +335,147 @@ def load_data() -> dict | None:
             return data if data else None
     except (json.JSONDecodeError, ValueError):
         return None
+
+
+def load_settings() -> dict:
+    """Load settings from disk."""
+    if not SETTINGS_FILE.exists():
+        return {}
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, ValueError):
+        return {}
+
+
+def save_settings(settings: dict) -> None:
+    """Save settings to disk."""
+    DATA_DIR.mkdir(exist_ok=True)
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(settings, f, ensure_ascii=False, indent=2)
+
+
+def login_via_browser() -> str | None:
+    """Open a browser window for ATGames login and return the JWT token.
+
+    Returns the token string on success, or None if the user closed the window
+    without logging in.
+    """
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
+    except ImportError:
+        return None
+
+    options = Options()
+    options.add_argument("--window-size=500,700")
+
+    try:
+        driver = webdriver.Chrome(options=options)
+    except Exception:
+        # Try without specifying service (uses PATH)
+        try:
+            driver = webdriver.Chrome(options=options)
+        except Exception:
+            return None
+
+    driver.get(ARCADENET_LOGIN_URL)
+
+    token = None
+    try:
+        # Poll localStorage for the token (set after successful login)
+        while True:
+            try:
+                # Check if window was closed
+                _ = driver.window_handles
+            except Exception:
+                break
+
+            try:
+                t = driver.execute_script("return localStorage.getItem('token');")
+                if t:
+                    token = t
+                    break
+            except Exception:
+                break
+
+            time.sleep(0.5)
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+    return token
+
+
+def get_token_expiry(token: str) -> float | None:
+    """Extract expiry timestamp from JWT token. Returns None if invalid."""
+    import base64
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (4 - len(payload) % 4)
+        decoded = json.loads(base64.b64decode(payload))
+        return decoded.get("exp")
+    except Exception:
+        return None
+
+
+def get_token_username(token: str) -> str | None:
+    """Extract user_name from JWT token."""
+    import base64
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (4 - len(payload) % 4)
+        decoded = json.loads(base64.b64decode(payload))
+        return decoded.get("user_name")
+    except Exception:
+        return None
+
+
+def is_token_valid(token: str | None) -> bool:
+    """Check if a JWT token exists and hasn't expired."""
+    if not token:
+        return False
+    exp = get_token_expiry(token)
+    if exp is None:
+        return False
+    return time.time() < exp
+
+
+def fetch_personal_scores(token: str, model: str = "RK9920") -> list[dict]:
+    """Fetch all personal high scores using an authenticated token.
+
+    Paginates through all results (API limit is 5 per page).
+    Returns a list of dicts with keys: game_id, internal_number, name, boxart,
+    rank, score, signature, hardware, created_at, etc.
+    """
+    headers = {"Authorization": f"Bearer {token}"}
+    all_scores: list[dict] = []
+    after = None
+
+    while True:
+        params: dict = {"limit": 5, "model": model}
+        if after:
+            params["after"] = after
+
+        resp = SESSION.get(PERSONAL_SCORES_URL, params=params, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if not data:
+            break
+
+        all_scores.extend(data)
+
+        if len(data) < 5:
+            break
+
+        after = data[-1]["game_id"]
+        time.sleep(0.1)
+
+    return all_scores
 
 
 if __name__ == "__main__":

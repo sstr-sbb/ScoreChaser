@@ -12,7 +12,10 @@ import requests
 from PIL import Image, ImageTk
 
 from scraper import (load_data, scrape_all, save_data, _APP_DIR,
-                     fetch_tournaments, fetch_tournament_scores)
+                     fetch_tournaments, fetch_tournament_scores,
+                     load_settings, save_settings, login_via_browser,
+                     is_token_valid, get_token_username,
+                     fetch_personal_scores)
 
 SETTINGS_FILE = _APP_DIR / "data" / "settings.json"
 
@@ -359,8 +362,12 @@ class PinballScoresApp:
         self._http_session = requests.Session()
         self._http_session.headers.update({"User-Agent": "PinballScores/1.0"})
 
+        self._token: str | None = None
+        self._personal_scores: list[dict] = []
+
         self._build_ui()
         self._load_saved_username()
+        self._load_token()
         self._load_existing_data()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -375,6 +382,13 @@ class PinballScoresApp:
         search_entry = ttk.Entry(top, textvariable=self.search_var, width=25)
         search_entry.pack(side=tk.LEFT, padx=(8, 16))
         search_entry.focus()
+
+        # ArcadeNet login button (right side of top bar)
+        self.login_btn = ttk.Button(top, text="LOGIN", command=self._start_login)
+        self.login_btn.pack(side=tk.RIGHT, padx=(8, 0))
+        self.login_status = tk.Label(top, text="", fg=FG_DIM, bg=BG_DARK,
+                                      font=(FONT_FAMILY, 9))
+        self.login_status.pack(side=tk.RIGHT)
 
         self.status_var = tk.StringVar(value="No data loaded.")
 
@@ -573,19 +587,95 @@ class PinballScoresApp:
 
     def _load_saved_username(self):
         try:
-            settings = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            settings = load_settings()
             name = settings.get("username", "")
             if name:
                 self.search_var.set(name)
-        except (FileNotFoundError, json.JSONDecodeError):
+        except Exception:
             pass
 
     def _save_username(self):
-        SETTINGS_FILE.parent.mkdir(exist_ok=True)
-        SETTINGS_FILE.write_text(
-            json.dumps({"username": self.search_var.get().strip()}, indent=2),
-            encoding="utf-8",
-        )
+        settings = load_settings()
+        settings["username"] = self.search_var.get().strip()
+        save_settings(settings)
+
+    def _load_token(self):
+        """Load stored token and update UI."""
+        settings = load_settings()
+        token = settings.get("token")
+        if is_token_valid(token):
+            self._token = token
+            username = get_token_username(token)
+            self.login_btn.config(text="LOGOUT")
+            self.login_status.config(text=f"✓ {username}", fg=NEON_GREEN)
+            self.root.after(200, self._fetch_personal_scores)
+        else:
+            self._token = None
+            self.login_btn.config(text="LOGIN")
+            self.login_status.config(text="", fg=FG_DIM)
+
+    def _save_token(self, token: str | None):
+        """Save token to settings."""
+        settings = load_settings()
+        if token:
+            settings["token"] = token
+        else:
+            settings.pop("token", None)
+        save_settings(settings)
+
+    def _start_login(self):
+        """Handle login/logout button click."""
+        if self._token:
+            # Logout
+            self._token = None
+            self._personal_scores.clear()
+            self._save_token(None)
+            self.login_btn.config(text="LOGIN")
+            self.login_status.config(text="", fg=FG_DIM)
+            self._on_search()  # Refresh tabs
+            return
+
+        self.login_btn.config(state=tk.DISABLED)
+        self.login_status.config(text="Logging in...", fg=NEON_YELLOW)
+
+        def do_login():
+            token = login_via_browser()
+            self.root.after(0, lambda: self._on_login_done(token))
+
+        threading.Thread(target=do_login, daemon=True).start()
+
+    def _on_login_done(self, token: str | None):
+        """Called when login browser window closes."""
+        self.login_btn.config(state=tk.NORMAL)
+        if token and is_token_valid(token):
+            self._token = token
+            self._save_token(token)
+            username = get_token_username(token)
+            self.login_btn.config(text="LOGOUT")
+            self.login_status.config(text=f"✓ {username}", fg=NEON_GREEN)
+            self._fetch_personal_scores()
+        else:
+            self.login_status.config(text="Login failed", fg=NEON_PINK)
+            self.root.after(3000, lambda: self.login_status.config(text=""))
+
+    def _fetch_personal_scores(self):
+        """Fetch personal scores in background."""
+        if not is_token_valid(self._token):
+            return
+
+        def do_fetch():
+            try:
+                scores = fetch_personal_scores(self._token)
+                self.root.after(0, lambda: self._on_personal_scores(scores))
+            except Exception:
+                pass
+
+        threading.Thread(target=do_fetch, daemon=True).start()
+
+    def _on_personal_scores(self, scores: list[dict]):
+        """Called when personal scores are fetched."""
+        self._personal_scores = scores
+        self._on_search()  # Refresh tabs to show personal data
 
     def _on_close(self):
         self._save_username()
@@ -649,6 +739,29 @@ class PinballScoresApp:
             self.notebook.forget(self.unranked_frame)
             self._user_tabs_visible = False
 
+    def _get_personal_map(self, search: str) -> dict[str, dict]:
+        """Build a map of game_id -> personal score entry from personal API data.
+
+        Only returns entries for the searched user.
+        """
+        pmap: dict[str, dict] = {}
+        if not self._personal_scores:
+            return pmap
+        token_user = get_token_username(self._token) if self._token else None
+        if not token_user or search != token_user.lower():
+            return pmap
+        for ps in self._personal_scores:
+            gid = str(ps.get("game_id", ""))
+            pmap[gid] = {
+                "rank": ps.get("rank"),
+                "userName": ps.get("user_name", ""),
+                "signature": ps.get("signature", ""),
+                "score": str(int(float(ps["score"]))) if ps.get("score") else "0",
+                "hardware": ps.get("hardware", ""),
+                "createdAt": ps.get("created_at", ""),
+            }
+        return pmap
+
     def _populate_tabs(self, search: str = ""):
         has_search = bool(search and self.data)
 
@@ -657,16 +770,23 @@ class PinballScoresApp:
         self.allgames_table.delete_all()
         self._allgames_game_ids.clear()
 
+        # Personal scores from API (includes ranks beyond top 100)
+        personal_map = self._get_personal_map(search) if has_search else {}
+
         # Pre-compute user entries for all games (needed for All Games + user tabs)
         user_map: dict[str, dict | None] = {}  # game_id -> user score entry or None
         if has_search:
             for game_id, game in self.data.items():
+                # First check leaderboard data (top 100)
+                entry = None
                 for s in game["scores"]:
                     if search == s.get("userName", "").lower():
-                        user_map[game_id] = s
+                        entry = s
                         break
-                else:
-                    user_map[game_id] = None
+                # If not in top 100, check personal API data
+                if entry is None and game_id in personal_map:
+                    entry = personal_map[game_id]
+                user_map[game_id] = entry
 
         sorted_games = sorted(self.data.items(), key=lambda x: x[1]["name"].lower())
         for game_id, game in sorted_games:
@@ -712,6 +832,22 @@ class PinballScoresApp:
                 ranked.append((game_id, game, entry, th))
             else:
                 unranked.append((game_id, game, th))
+
+        # Also add personal scores for games not in the scraped data
+        for gid, ps_entry in personal_map.items():
+            if gid not in self.data and gid not in {r[0] for r in ranked}:
+                # Create a minimal game dict for games only in personal data
+                ps_raw = next((p for p in self._personal_scores
+                               if str(p.get("game_id", "")) == gid), None)
+                if ps_raw:
+                    game = {
+                        "name": ps_raw.get("name", "Unknown"),
+                        "game_id": ps_raw.get("game_id"),
+                        "internal_number": ps_raw.get("internal_number", ""),
+                        "boxart": ps_raw.get("boxart_480w") or ps_raw.get("boxart", ""),
+                        "scores": [],
+                    }
+                    ranked.append((gid, game, ps_entry, _get_thresholds([])))
 
         # Only show user tabs if there's at least one match
         if not ranked:
