@@ -1,4 +1,4 @@
-"""Scraper for ATGames ArcadeNet leaderboards."""
+"""ScoreChaser - Scraper for ATGames ArcadeNet leaderboards."""
 
 import json
 import re
@@ -42,7 +42,7 @@ _thread_local = threading.local()
 def _new_session() -> requests.Session:
     s = requests.Session()
     s.headers.update({
-        "User-Agent": "PinballScores/1.0",
+        "User-Agent": "ScoreChaser/1.0",
         "Accept": "application/json",
     })
     retry = Retry(total=3, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])

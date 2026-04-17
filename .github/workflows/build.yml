@@ -12,13 +12,13 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            artifact: PinballScores-Windows
+            artifact: ScoreChaser-Windows
             ext: .exe
           - os: ubuntu-latest
-            artifact: PinballScores-Linux
+            artifact: ScoreChaser-Linux
             ext: ""
           - os: macos-latest
-            artifact: PinballScores-macOS
+            artifact: ScoreChaser-macOS
             ext: ""
 
     runs-on: ${{ matrix.os }}
@@ -37,13 +37,13 @@ jobs:
           pip install -r requirements.txt pyinstaller
 
       - name: Build executable
-        run: pyinstaller PinballScores.spec
+        run: pyinstaller ScoreChaser.spec
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: dist/PinballScores${{ matrix.ext }}
+          path: dist/ScoreChaser${{ matrix.ext }}
 
   release:
     needs: build
@@ -62,16 +62,16 @@ jobs:
       - name: Prepare release files
         run: |
           mkdir -p release
-          cp artifacts/PinballScores-Windows/PinballScores.exe release/PinballScores-Windows.exe
-          cp artifacts/PinballScores-Linux/PinballScores release/PinballScores-Linux
-          cp artifacts/PinballScores-macOS/PinballScores release/PinballScores-macOS
-          chmod +x release/PinballScores-Linux release/PinballScores-macOS
+          cp artifacts/ScoreChaser-Windows/ScoreChaser.exe release/ScoreChaser-Windows.exe
+          cp artifacts/ScoreChaser-Linux/ScoreChaser release/ScoreChaser-Linux
+          cp artifacts/ScoreChaser-macOS/ScoreChaser release/ScoreChaser-macOS
+          chmod +x release/ScoreChaser-Linux release/ScoreChaser-macOS
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            release/PinballScores-Windows.exe
-            release/PinballScores-Linux
-            release/PinballScores-macOS
+            release/ScoreChaser-Windows.exe
+            release/ScoreChaser-Linux
+            release/ScoreChaser-macOS
           generate_release_notes: true

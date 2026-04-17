@@ -1,4 +1,4 @@
-"""PinballScores - ATGames Leaderboard Viewer."""
+"""ScoreChaser - ATGames Leaderboard Viewer."""
 
 import io
 import json
@@ -19,24 +19,81 @@ from scraper import (load_data, scrape_all, save_data, _APP_DIR,
 
 SETTINGS_FILE = _APP_DIR / "data" / "settings.json"
 
-# -- Color Scheme (Pinball / Arcade) --
-BG_DARK = "#0a0a1a"
-BG_PANEL = "#12122b"
-BG_WIDGET = "#1a1a3e"
-BG_HEADER = "#252550"
-FG_DEFAULT = "#d0d0e0"
-FG_DIM = "#707090"
-NEON_PINK = "#ff2d78"
-NEON_CYAN = "#00e5ff"
-NEON_GREEN = "#00ff41"
-NEON_YELLOW = "#ffe600"
-NEON_ORANGE = "#ff9100"
-GOLD = "#ffd700"
-HIGHLIGHT_BG = "#3a2a00"
-TOP10_BG = "#1a2e1a"
-TOP50_BG = "#141e30"
+# -- Color Scheme (Amber main + vivid colorful accents) --
+BG_DARK = "#080600"
+BG_PANEL = "#100e06"
+BG_WIDGET = "#181408"
+BG_HEADER = "#1e1a08"
+FG_DEFAULT = "#dda840"       # default text (warm amber)
+FG_DIM = "#806020"           # dimmed text
+AMBER = "#ffb800"            # classic amber phosphor (main color)
+AMBER_BRIGHT = "#ffdd50"     # highlighted amber
+AMBER_DIM = "#aa7000"        # subdued amber
+NEON_PINK = "#ff4060"        # vivid hot pink (game names)
+NEON_CYAN = "#00e8ff"        # electric cyan (secondary info)
+NEON_GREEN = "#00ff60"       # vivid green (top scores, active)
+NEON_YELLOW = "#ffee00"      # electric yellow (user scores)
+NEON_ORANGE = "#ff6a00"      # vivid orange (tertiary accents)
+GOLD = "#ffd000"             # bright gold (highscores)
+HIGHLIGHT_BG = "#2a1800"     # user row highlight
+TOP10_BG = "#081a08"         # top 10 row bg (green tint)
+TOP50_BG = "#0a1018"         # top 50 row bg (cyan tint)
 
 FONT_FAMILY = "Ubuntu Sans Mono"
+
+# LCD/Dot-matrix font for title (loaded at runtime)
+_TITLE_FONT_FAMILY = FONT_FAMILY  # fallback until loaded
+
+# Resolve font path relative to app directory
+if getattr(sys, "frozen", False):
+    _FONT_DIR = Path(sys.executable).parent / "fonts"
+else:
+    _FONT_DIR = Path(__file__).parent / "fonts"
+
+_TITLE_FONT_BOLD = _FONT_DIR / "DSEG14Classic-Bold.ttf"
+_TITLE_FONT_REGULAR = _FONT_DIR / "DSEG14Classic-Regular.ttf"
+_MAIN_FONT_PATH = _FONT_DIR / "ShareTechMono-Regular.ttf"
+
+
+def _install_font(font_path: Path):
+    """Install a font file for the current session."""
+    if not font_path.exists():
+        return
+    path_str = str(font_path)
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.gdi32.AddFontResourceExW(path_str, 0x10, 0)
+        except Exception:
+            pass
+    else:
+        try:
+            user_fonts = Path.home() / ".local" / "share" / "fonts"
+            user_fonts.mkdir(parents=True, exist_ok=True)
+            dest = user_fonts / font_path.name
+            if not dest.exists():
+                import shutil
+                shutil.copy2(path_str, dest)
+        except Exception:
+            pass
+
+
+def _load_fonts(root: tk.Tk):
+    """Load all custom fonts (DSEG14 for titles, Share Tech Mono for UI)."""
+    global _TITLE_FONT_FAMILY, FONT_FAMILY
+    _install_font(_TITLE_FONT_BOLD)
+    _install_font(_TITLE_FONT_REGULAR)
+    _install_font(_MAIN_FONT_PATH)
+
+    try:
+        import tkinter.font as tkfont
+        families = [f.lower() for f in tkfont.families()]
+        if "dseg14 classic" in families:
+            _TITLE_FONT_FAMILY = "DSEG14 Classic"
+        if "share tech mono" in families:
+            FONT_FAMILY = "Share Tech Mono"
+    except Exception:
+        pass
 def _format_score(score_str: str) -> str:
     try:
         return f"{int(score_str):,}".replace(",", ".")
@@ -55,9 +112,9 @@ def _get_thresholds(scores: list[dict]) -> dict:
     }
 
 
-SEL_BG = "#252560"
+SEL_BG = "#2a2200"
 ROW_EVEN = BG_PANEL
-ROW_ODD = "#0f0f25"
+ROW_ODD = "#0e0c06"
 
 
 class ColorTable:
@@ -77,6 +134,10 @@ class ColorTable:
         self._select_callbacks: list = []
         self._values: list[tuple] = []
         self._row_tags: list[list[str]] = []
+        self._row_data: list = []  # optional per-row data (e.g. game_ids)
+        self._sort_col: int = -1
+        self._sort_asc: bool = True
+        self._headers: list[tk.Label] = []
 
         # Scrollbar (right side of everything)
         scroll = ttk.Scrollbar(parent, orient=tk.VERTICAL)
@@ -104,9 +165,13 @@ class ColorTable:
                 col_frame.pack_propagate(False)
             self._col_frames.append(col_frame)
 
-            # Header label at top of column
-            tk.Label(col_frame, text=text, fg=fg, bg=BG_HEADER, height=1,
-                     font=(FONT_FAMILY, 9, "bold")).pack(fill=tk.X)
+            # Header label at top of column (clickable for sorting)
+            col_idx = len(self._headers)
+            hdr = tk.Label(col_frame, text=text, fg=fg, bg=BG_HEADER, height=1,
+                           font=(FONT_FAMILY, 9, "bold"), cursor="hand2")
+            hdr.pack(fill=tk.X)
+            hdr.bind("<Button-1>", lambda e, ci=col_idx: self.sort_by(ci))
+            self._headers.append(hdr)
 
             # Treeview below header
             t = ttk.Treeview(col_frame, columns=("v",), show="", selectmode="none",
@@ -214,8 +279,10 @@ class ColorTable:
             sel_kw["background"] = SEL_BG
             self._trees[col_idx].tag_configure(f"{tag_name}_sel", **sel_kw)
 
-    def insert(self, values, col_tags: dict[int, str] | None = None):
-        """Insert a row. col_tags: optional {col_index: tag_name} overrides."""
+    def insert(self, values, col_tags: dict[int, str] | None = None,
+               row_data=None):
+        """Insert a row. col_tags: optional {col_index: tag_name} overrides.
+        row_data: optional arbitrary data stored alongside the row."""
         base_tag = "even" if self._row_count % 2 == 0 else "odd"
         row_tags = []
         for i, t in enumerate(self._trees):
@@ -225,6 +292,7 @@ class ColorTable:
             row_tags.append(tag)
         self._values.append(values)
         self._row_tags.append(row_tags)
+        self._row_data.append(row_data)
         self._row_count += 1
 
     def delete_all(self):
@@ -232,14 +300,99 @@ class ColorTable:
             t.delete(*t.get_children())
         self._values.clear()
         self._row_tags.clear()
+        self._row_data.clear()
         self._row_count = 0
         self._sel_idx = -1
+
+    def get_row_data(self, idx: int):
+        """Get the row_data for the row at the given index."""
+        if 0 <= idx < len(self._row_data):
+            return self._row_data[idx]
+        return None
 
     def selection_index(self) -> int:
         return self._sel_idx
 
     def bind_select(self, callback):
         self._select_callbacks.append(callback)
+
+    def bind_right_click(self, callback):
+        """Register a right-click callback. Called with (event, row_index)."""
+        def _on_right(event):
+            iid = event.widget.identify_row(event.y)
+            if not iid:
+                return
+            idx = event.widget.index(iid)
+            self._set_selection(idx)
+            callback(event, idx)
+        for t in self._trees:
+            t.bind("<Button-3>", _on_right)
+
+    @staticmethod
+    def _sort_key(val):
+        """Parse a display value for sorting: numeric (dot-separated) or string."""
+        if val == "" or val is None:
+            return (1, 0, "")  # blanks sort last
+        s = str(val)
+        # Try parsing as number (scores use dots as thousands sep: "1.234.567")
+        try:
+            return (0, int(s.replace(".", "")), "")
+        except (ValueError, TypeError):
+            pass
+        # "unranked" sorts after numbers
+        if s == "unranked":
+            return (1, 0, "")
+        return (0, 0, s.lower())
+
+    def sort_by(self, col_idx: int):
+        """Sort the table by the given column index."""
+        if not self._values:
+            return
+
+        # Toggle direction if same column, else ascending
+        if col_idx == self._sort_col:
+            self._sort_asc = not self._sort_asc
+        else:
+            self._sort_col = col_idx
+            self._sort_asc = True
+
+        # Update header indicators
+        for i, hdr in enumerate(self._headers):
+            base_text = self._col_defs[i][1]
+            if i == col_idx:
+                arrow = " ▲" if self._sort_asc else " ▼"
+                hdr.config(text=base_text + arrow)
+            else:
+                hdr.config(text=base_text)
+
+        # Build sortable index
+        decorated = list(range(len(self._values)))
+        decorated.sort(
+            key=lambda idx: self._sort_key(self._values[idx][col_idx]
+                                            if col_idx < len(self._values[idx]) else ""),
+            reverse=not self._sort_asc,
+        )
+
+        # Reorder internal data
+        self._values = [self._values[i] for i in decorated]
+        self._row_data = [self._row_data[i] for i in decorated]
+
+        # Re-render all rows
+        for t in self._trees:
+            t.delete(*t.get_children())
+        self._row_tags.clear()
+        self._row_count = 0
+        self._sel_idx = -1
+
+        for values in self._values:
+            base_tag = "even" if self._row_count % 2 == 0 else "odd"
+            row_tags = []
+            for i, t in enumerate(self._trees):
+                val = values[i] if i < len(values) else ""
+                t.insert("", tk.END, values=(val,), tags=(base_tag,))
+                row_tags.append(base_tag)
+            self._row_tags.append(row_tags)
+            self._row_count += 1
 
 
 HARDWARE_NAMES = {
@@ -276,24 +429,24 @@ def _apply_theme(root: tk.Tk):
     style.configure("TFrame", background=BG_DARK)
     style.configure("TLabel", background=BG_DARK, foreground=FG_DEFAULT,
                      font=(FONT_FAMILY, 10))
-    style.configure("Title.TLabel", foreground=NEON_PINK,
+    style.configure("Title.TLabel", foreground=AMBER,
                      font=(FONT_FAMILY, 13, "bold"))
     style.configure("Status.TLabel", foreground=FG_DIM, font=(FONT_FAMILY, 9))
 
     # Entry
-    style.configure("TEntry", fieldbackground=BG_WIDGET, foreground=NEON_CYAN,
-                     insertcolor=NEON_CYAN, font=(FONT_FAMILY, 11))
+    style.configure("TEntry", fieldbackground=BG_WIDGET, foreground=AMBER,
+                     insertcolor=AMBER, font=(FONT_FAMILY, 11))
     style.map("TEntry",
-              fieldbackground=[("focus", "#1e1e4a")],
-              foreground=[("focus", NEON_CYAN)])
+              fieldbackground=[("focus", "#1e1a08")],
+              foreground=[("focus", AMBER_BRIGHT)])
 
     # Button
-    style.configure("TButton", background=BG_WIDGET, foreground=NEON_PINK,
+    style.configure("TButton", background=BG_WIDGET, foreground=NEON_ORANGE,
                      font=(FONT_FAMILY, 10, "bold"), padding=(12, 6),
                      borderwidth=1, relief="raised")
     style.map("TButton",
-              background=[("active", "#2a2a5e"), ("pressed", "#1a1a3e")],
-              foreground=[("active", NEON_YELLOW), ("disabled", FG_DIM)])
+              background=[("active", "#2a2200"), ("pressed", "#1a1600")],
+              foreground=[("active", AMBER_BRIGHT), ("disabled", FG_DIM)])
 
     # Notebook (tabs)
     style.configure("TNotebook", background=BG_DARK, borderwidth=0)
@@ -302,7 +455,7 @@ def _apply_theme(root: tk.Tk):
                      borderwidth=0)
     style.map("TNotebook.Tab",
               background=[("selected", BG_HEADER)],
-              foreground=[("selected", NEON_CYAN)])
+              foreground=[("selected", AMBER)])
 
     # Treeview
     style.configure("Treeview",
@@ -321,14 +474,14 @@ def _apply_theme(root: tk.Tk):
 
     style.configure("Treeview.Heading",
                      background=BG_HEADER,
-                     foreground=NEON_PINK,
+                     foreground=AMBER,
                      font=(FONT_FAMILY, 9, "bold"),
                      borderwidth=1, relief="flat")
     style.map("Treeview.Heading",
-              background=[("active", "#303068")])
+              background=[("active", "#2a2200")])
     style.map("Treeview",
-              background=[("selected", "#252560")],
-              foreground=[("selected", NEON_CYAN)])
+              background=[("selected", SEL_BG)],
+              foreground=[("selected", AMBER_BRIGHT)])
 
     # Scrollbar
     style.configure("Vertical.TScrollbar",
@@ -339,8 +492,8 @@ def _apply_theme(root: tk.Tk):
 
     # Progressbar
     style.configure("TProgressbar",
-                     background=NEON_GREEN, troughcolor=BG_WIDGET,
-                     borderwidth=1, lightcolor="#303060", darkcolor="#303060",
+                     background=AMBER, troughcolor=BG_WIDGET,
+                     borderwidth=1, lightcolor="#302800", darkcolor="#302800",
                      thickness=18)
 
     # PanedWindow
@@ -350,23 +503,36 @@ def _apply_theme(root: tk.Tk):
 class PinballScoresApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("PinballScores - ATGames Leaderboards")
+        self.root.title("ScoreChaser - ATGames Leaderboards")
         self.root.geometry("1400x750")
         self.root.minsize(1000, 500)
         self.root.configure(bg=BG_DARK)
 
+        # App icon
+        _icon_path = _APP_DIR / "icon.png"
+        if _icon_path.exists():
+            try:
+                _icon_img = ImageTk.PhotoImage(Image.open(_icon_path))
+                self.root.iconphoto(True, _icon_img)
+                self._app_icon = _icon_img  # prevent garbage collection
+            except Exception:
+                pass
+
+        _load_fonts(root)
         _apply_theme(root)
 
         self.data: dict = {}
         self._image_cache: dict[str, ImageTk.PhotoImage] = {}
         self._http_session = requests.Session()
-        self._http_session.headers.update({"User-Agent": "PinballScores/1.0"})
+        self._http_session.headers.update({"User-Agent": "ScoreChaser/1.0"})
 
         self._token: str | None = None
         self._personal_scores: list[dict] = []
+        self._hidden_games: set[str] = set()
+        self._load_hidden_games()
 
         self._build_ui()
-        self._load_saved_username()
+        self._update_hidden_btn()
         self._load_token()
         self._load_existing_data()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -376,12 +542,9 @@ class PinballScoresApp:
         top = ttk.Frame(self.root, padding=8)
         top.pack(fill=tk.X)
 
-        ttk.Label(top, text="USERNAME", style="Title.TLabel").pack(side=tk.LEFT)
+        tk.Label(top, text="SCORE CHASER", fg=AMBER, bg=BG_DARK,
+                 font=(_TITLE_FONT_FAMILY, 16)).pack(side=tk.LEFT)
         self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", lambda *_: self._on_search())
-        search_entry = ttk.Entry(top, textvariable=self.search_var, width=25)
-        search_entry.pack(side=tk.LEFT, padx=(8, 16))
-        search_entry.focus()
 
         # ArcadeNet login button (right side of top bar)
         self.login_btn = ttk.Button(top, text="LOGIN", command=self._start_login)
@@ -399,6 +562,10 @@ class PinballScoresApp:
         self.scrape_btn = ttk.Button(self.statusbar, text="REFRESH", command=self._start_scrape)
         self.scrape_btn.pack(side=tk.RIGHT)
 
+        self.hidden_btn = ttk.Button(self.statusbar, text="Hidden (0)",
+                                      command=self._show_hidden_dialog)
+        # Initially hidden, shown via _update_hidden_btn if games are hidden
+
         self.status_label = tk.Label(
             self.statusbar, textvariable=self.status_var,
             fg=FG_DIM, bg=BG_PANEL, font=(FONT_FAMILY, 9), anchor="w",
@@ -410,7 +577,7 @@ class PinballScoresApp:
             self.statusbar, variable=self.progress_var, maximum=100
         )
         self.progress_label = tk.Label(
-            self.statusbar, text="", fg=NEON_GREEN, bg=BG_PANEL,
+            self.statusbar, text="", fg=AMBER, bg=BG_PANEL,
             font=(FONT_FAMILY, 9),
         )
         # Progress widgets start hidden, shown during scraping
@@ -454,15 +621,6 @@ class PinballScoresApp:
         ])
         self.ranked_table.bind_select(lambda: self._on_left_select("ranked"))
 
-        # --- Tab 2: User Unranked Games (added/removed dynamically) ---
-        self.unranked_frame = ttk.Frame(self.notebook)
-
-        self.unranked_table = ColorTable(self.unranked_frame, [
-            ("game", "TABLE", 230, "w", False, NEON_PINK),
-            *[(c, t, w, "center", True, fg) for c, t, w, fg in score_col_defs],
-        ])
-        self.unranked_table.bind_select(lambda: self._on_left_select("unranked"))
-
         self._user_tabs_visible = False
 
         # --- Tab 3: Tournaments (always visible, drill-down) ---
@@ -474,15 +632,15 @@ class PinballScoresApp:
                                                padx=6, pady=4)
         self.tournament_back_btn = tk.Button(
             self.tournament_back_frame, text="←",
-            fg=NEON_CYAN, bg=BG_WIDGET, activeforeground=NEON_YELLOW,
-            activebackground="#2a2a5e", font=(FONT_FAMILY, 11, "bold"),
+            fg=AMBER, bg=BG_WIDGET, activeforeground=AMBER_BRIGHT,
+            activebackground="#2a2200", font=(FONT_FAMILY, 11, "bold"),
             bd=0, padx=6, pady=0, cursor="hand2",
             command=self._tournament_go_back,
         )
         self.tournament_back_btn.pack(side=tk.LEFT, padx=(0, 8))
 
         self.tournament_info_label = tk.Label(
-            self.tournament_back_frame, text="", fg=NEON_PINK, bg=BG_HEADER,
+            self.tournament_back_frame, text="", fg=AMBER, bg=BG_HEADER,
             font=(FONT_FAMILY, 10, "bold"), anchor="w", cursor="hand2",
         )
         self.tournament_info_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -520,7 +678,8 @@ class PinballScoresApp:
         self.boxart_label.pack(side=tk.LEFT, padx=(0, 8))
         self._boxart_placeholder = None  # will hold a blank image
 
-        self.detail_label = ttk.Label(header, text="SELECT A TABLE", style="Title.TLabel")
+        self.detail_label = tk.Label(header, text="SELECT A TABLE", fg=AMBER,
+                                      bg=BG_DARK, font=(_TITLE_FONT_FAMILY, 11))
         self.detail_label.pack(side=tk.LEFT, anchor=tk.W)
 
         detail_cols = ("rank", "userName", "initials", "score", "hardware", "date")
@@ -542,20 +701,27 @@ class PinballScoresApp:
         self.detail_tree.tag_configure("highlight", background=HIGHLIGHT_BG, foreground=NEON_YELLOW)
         self.detail_tree.tag_configure("top10", background=TOP10_BG, foreground=NEON_GREEN)
         self.detail_tree.tag_configure("top50", background=TOP50_BG, foreground=NEON_CYAN)
-        self.detail_tree.tag_configure("rank1", background="#2a1a00", foreground=GOLD)
+        self.detail_tree.tag_configure("rank1", background="#2a1800", foreground=GOLD)
         self.detail_tree.tag_configure("game_sep", background=BG_HEADER, foreground=NEON_PINK)
 
         # Right-click context menu on detail tree
         self._ctx_menu = tk.Menu(self.root, tearoff=0, bg=BG_WIDGET, fg=FG_DEFAULT,
-                                  activebackground=NEON_PINK, activeforeground="white",
+                                  activebackground=AMBER_DIM, activeforeground=AMBER_BRIGHT,
                                   font=(FONT_FAMILY, 10))
         self._ctx_menu.add_command(label="Search this user", command=self._ctx_search_user)
         self.detail_tree.bind("<Button-3>", self._on_detail_right_click)
 
-        # Store game_id mapping for left-side trees
-        self._allgames_game_ids: list[str] = []
-        self._ranked_game_ids: list[str] = []
-        self._unranked_game_ids: list[str] = []
+        # Right-click context menu on table rows (for hide game)
+        self._table_ctx_menu = tk.Menu(self.root, tearoff=0, bg=BG_WIDGET, fg=FG_DEFAULT,
+                                        activebackground=AMBER_DIM, activeforeground=AMBER_BRIGHT,
+                                        font=(FONT_FAMILY, 10))
+        self._table_ctx_menu.add_command(label="Hide game", command=self._ctx_hide_game)
+        self._table_ctx_game_id: str | None = None
+
+        # Bind right-click on ranked_table (always exists)
+        self.ranked_table.bind_right_click(self._on_table_right_click)
+
+        # (game_ids are now stored as row_data inside ColorTable)
 
 
     @staticmethod
@@ -576,6 +742,24 @@ class PinballScoresApp:
         self.detail_tree.selection_set(item)
         self._ctx_menu.post(event.x_root, event.y_root)
 
+    def _on_table_right_click(self, event, row_idx):
+        """Right-click on a ColorTable row — show hide menu."""
+        table = event.widget.master.master  # tree -> col_frame -> body -> ...
+        # Find which ColorTable this belongs to
+        for t in [self.allgames_table, self.ranked_table]:
+            if t and event.widget in t._trees:
+                game_id = t.get_row_data(row_idx)
+                if game_id:
+                    self._table_ctx_game_id = game_id
+                    self._table_ctx_menu.post(event.x_root, event.y_root)
+                return
+
+    def _ctx_hide_game(self):
+        """Hide the game from right-click context."""
+        if self._table_ctx_game_id:
+            self._hide_game(self._table_ctx_game_id)
+            self._table_ctx_game_id = None
+
     def _ctx_search_user(self):
         sel = self.detail_tree.selection()
         if not sel:
@@ -585,19 +769,103 @@ class PinballScoresApp:
         if username:
             self.search_var.set(username)
 
-    def _load_saved_username(self):
-        try:
-            settings = load_settings()
-            name = settings.get("username", "")
-            if name:
-                self.search_var.set(name)
-        except Exception:
-            pass
-
-    def _save_username(self):
+    def _load_hidden_games(self):
         settings = load_settings()
-        settings["username"] = self.search_var.get().strip()
+        self._hidden_games = set(settings.get("hidden_games", []))
+
+    def _save_hidden_games(self):
+        settings = load_settings()
+        settings["hidden_games"] = sorted(self._hidden_games)
         save_settings(settings)
+
+    def _hide_game(self, game_id: str):
+        """Hide a game from the tables."""
+        self._hidden_games.add(game_id)
+        self._save_hidden_games()
+        self._update_hidden_btn()
+        self._on_search()
+
+    def _unhide_game(self, game_id: str):
+        """Unhide a game."""
+        self._hidden_games.discard(game_id)
+        self._save_hidden_games()
+        self._update_hidden_btn()
+        self._on_search()
+
+    def _unhide_all(self):
+        self._hidden_games.clear()
+        self._save_hidden_games()
+        self._update_hidden_btn()
+        self._on_search()
+
+    def _update_hidden_btn(self):
+        n = len(self._hidden_games)
+        if n > 0:
+            self.hidden_btn.config(text=f"Hidden ({n})")
+            self.hidden_btn.pack(side=tk.RIGHT, padx=(8, 0))
+        else:
+            self.hidden_btn.pack_forget()
+
+    def _show_hidden_dialog(self):
+        """Show dialog to manage hidden games."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Hidden Games")
+        dlg.geometry("400x350")
+        dlg.configure(bg=BG_DARK)
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        tk.Label(dlg, text="HIDDEN GAMES", fg=NEON_PINK, bg=BG_DARK,
+                 font=(FONT_FAMILY, 11, "bold")).pack(pady=(12, 8))
+
+        # Listbox with hidden game names
+        frame = tk.Frame(dlg, bg=BG_DARK)
+        frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
+
+        scroll = tk.Scrollbar(frame)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        listbox = tk.Listbox(frame, bg=BG_WIDGET, fg=FG_DEFAULT,
+                              selectbackground=NEON_PINK, selectforeground="white",
+                              font=(FONT_FAMILY, 10), yscrollcommand=scroll.set,
+                              selectmode=tk.EXTENDED)
+        listbox.pack(fill=tk.BOTH, expand=True)
+        scroll.config(command=listbox.yview)
+
+        # Populate with game names
+        hidden_list = []
+        for gid in sorted(self._hidden_games):
+            game = self.data.get(gid)
+            name = game["name"] if game else f"Game #{gid}"
+            hidden_list.append((gid, name))
+            listbox.insert(tk.END, name)
+
+        btn_frame = tk.Frame(dlg, bg=BG_DARK)
+        btn_frame.pack(fill=tk.X, padx=12, pady=12)
+
+        def unhide_selected():
+            sel = listbox.curselection()
+            for idx in reversed(sel):
+                gid = hidden_list[idx][0]
+                self._hidden_games.discard(gid)
+                listbox.delete(idx)
+                hidden_list.pop(idx)
+            self._save_hidden_games()
+            self._update_hidden_btn()
+            self._on_search()
+            if not hidden_list:
+                dlg.destroy()
+
+        def unhide_all():
+            self._unhide_all()
+            dlg.destroy()
+
+        ttk.Button(btn_frame, text="UNHIDE SELECTED",
+                   command=unhide_selected).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btn_frame, text="UNHIDE ALL",
+                   command=unhide_all).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="CLOSE",
+                   command=dlg.destroy).pack(side=tk.RIGHT)
 
     def _load_token(self):
         """Load stored token and update UI."""
@@ -606,11 +874,13 @@ class PinballScoresApp:
         if is_token_valid(token):
             self._token = token
             username = get_token_username(token)
+            self.search_var.set(username or "")
             self.login_btn.config(text="LOGOUT")
             self.login_status.config(text=f"✓ {username}", fg=NEON_GREEN)
             self.root.after(200, self._fetch_personal_scores)
         else:
             self._token = None
+            self.search_var.set("")
             self.login_btn.config(text="LOGIN")
             self.login_status.config(text="", fg=FG_DIM)
 
@@ -630,9 +900,10 @@ class PinballScoresApp:
             self._token = None
             self._personal_scores.clear()
             self._save_token(None)
+            self.search_var.set("")
             self.login_btn.config(text="LOGIN")
             self.login_status.config(text="", fg=FG_DIM)
-            self._on_search()  # Refresh tabs
+            self._on_search()
             return
 
         self.login_btn.config(state=tk.DISABLED)
@@ -651,6 +922,7 @@ class PinballScoresApp:
             self._token = token
             self._save_token(token)
             username = get_token_username(token)
+            self.search_var.set(username or "")
             self.login_btn.config(text="LOGOUT")
             self.login_status.config(text=f"✓ {username}", fg=NEON_GREEN)
             self._fetch_personal_scores()
@@ -680,7 +952,6 @@ class PinballScoresApp:
         self._on_search()  # Refresh tabs to show personal data
 
     def _on_close(self):
-        self._save_username()
         self.root.destroy()
 
     def _load_existing_data(self):
@@ -727,18 +998,17 @@ class PinballScoresApp:
 
         self.allgames_table = ColorTable(self.allgames_frame, cols)
         self.allgames_table.bind_select(lambda: self._on_left_select("allgames"))
+        self.allgames_table.bind_right_click(self._on_table_right_click)
         self._allgames_has_user_cols = with_user
 
     def _add_user_tabs(self):
         if not self._user_tabs_visible:
             self.notebook.add(self.ranked_frame)
-            self.notebook.add(self.unranked_frame)
             self._user_tabs_visible = True
 
     def _remove_user_tabs(self):
         if self._user_tabs_visible:
             self.notebook.forget(self.ranked_frame)
-            self.notebook.forget(self.unranked_frame)
             self._user_tabs_visible = False
 
     def _get_personal_map(self, search: str) -> dict[str, dict]:
@@ -770,7 +1040,7 @@ class PinballScoresApp:
         # Rebuild All Games table if user-column state changed
         self._rebuild_allgames_table(with_user=has_search)
         self.allgames_table.delete_all()
-        self._allgames_game_ids.clear()
+        # (row data cleared via allgames_table.delete_all)
 
         # Personal scores from API (includes ranks beyond top 100)
         personal_map = self._get_personal_map(search) if has_search else {}
@@ -791,6 +1061,7 @@ class PinballScoresApp:
                 user_map[game_id] = entry
 
         sorted_games = sorted(self.data.items(), key=lambda x: x[1]["name"].lower())
+        sorted_games = [(gid, g) for gid, g in sorted_games if gid not in self._hidden_games]
         for game_id, game in sorted_games:
             th = _get_thresholds(game["scores"])
             if has_search:
@@ -803,7 +1074,7 @@ class PinballScoresApp:
                     _format_score(th["top10"]),
                     _format_score(th["top50"]),
                     _format_score(th["top100"]),
-                ))
+                ), row_data=game_id)
             else:
                 self.allgames_table.insert((
                     game["name"],
@@ -811,8 +1082,7 @@ class PinballScoresApp:
                     _format_score(th["top10"]),
                     _format_score(th["top50"]),
                     _format_score(th["top100"]),
-                ))
-            self._allgames_game_ids.append(game_id)
+                ), row_data=game_id)
 
         self.allgames_table.auto_resize()
         self.notebook.tab(0, text=f" ALL TABLES ({len(self.data)}) ")
@@ -822,23 +1092,21 @@ class PinballScoresApp:
             self.notebook.select(0)
             return
 
-        # Build ranked / unranked lists for user tabs
+        # Build ranked list for user tab
         username = self.search_var.get().strip()
         ranked = []
-        unranked = []
 
         for game_id, game in self.data.items():
+            if game_id in self._hidden_games:
+                continue
             th = _get_thresholds(game["scores"])
             entry = user_map.get(game_id)
             if entry:
                 ranked.append((game_id, game, entry, th))
-            else:
-                unranked.append((game_id, game, th))
 
         # Also add personal scores for games not in the scraped data
         for gid, ps_entry in personal_map.items():
             if gid not in self.data and gid not in {r[0] for r in ranked}:
-                # Create a minimal game dict for games only in personal data
                 ps_raw = next((p for p in self._personal_scores
                                if str(p.get("game_id", "")) == gid), None)
                 if ps_raw:
@@ -851,7 +1119,6 @@ class PinballScoresApp:
                     }
                     ranked.append((gid, game, ps_entry, _get_thresholds([])))
 
-        # Only show user tabs if there's at least one match
         if not ranked:
             self._remove_user_tabs()
             self.notebook.select(0)
@@ -860,9 +1127,7 @@ class PinballScoresApp:
         self._add_user_tabs()
 
         self.ranked_table.delete_all()
-        self.unranked_table.delete_all()
-        self._ranked_game_ids.clear()
-        self._unranked_game_ids.clear()
+        # (row data cleared via ranked_table.delete_all)
 
         ranked.sort(key=lambda x: (x[2].get("rank", 999)))
         for game_id, game, entry, th in ranked:
@@ -874,41 +1139,26 @@ class PinballScoresApp:
                 _format_score(th["high"]),
                 _format_score(th["top10"]),
                 _format_score(th["top50"]),
-            ))
-            self._ranked_game_ids.append(game_id)
-
-        unranked.sort(key=lambda x: x[1]["name"].lower())
-        for game_id, game, th in unranked:
-            self.unranked_table.insert((
-                game["name"],
-                _format_score(th["high"]),
-                _format_score(th["top10"]),
-                _format_score(th["top50"]),
-                _format_score(th["top100"]),
-            ))
-            self._unranked_game_ids.append(game_id)
+            ), row_data=game_id)
 
         self.ranked_table.auto_resize()
-        self.unranked_table.auto_resize()
 
         self.notebook.tab(self.ranked_frame,
                           text=f" {username}'s Rankings ({len(ranked)}) ")
-        self.notebook.tab(self.unranked_frame,
-                          text=f" {username}'s Unranked ({len(unranked)}) ")
         self.notebook.select(self.ranked_frame)
 
     def _on_left_select(self, source: str):
         table_map = {
-            "allgames": (self.allgames_table, self._allgames_game_ids),
-            "ranked": (self.ranked_table, self._ranked_game_ids),
-            "unranked": (self.unranked_table, self._unranked_game_ids),
+            "allgames": self.allgames_table,
+            "ranked": self.ranked_table,
         }
-        table, id_list = table_map[source]
-        idx = table.selection_index()
-        if idx < 0 or idx >= len(id_list):
+        table = table_map.get(source)
+        if not table:
             return
-        game_id = id_list[idx]
-        self._show_detail(self.data[game_id])
+        idx = table.selection_index()
+        game_id = table.get_row_data(idx)
+        if game_id and game_id in self.data:
+            self._show_detail(self.data[game_id])
 
     def _load_boxart(self, url: str):
         """Load boxart image on-demand in background thread."""
