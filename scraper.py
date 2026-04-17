@@ -364,23 +364,34 @@ def login_via_browser() -> tuple[str | None, str | None]:
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
     except ImportError:
         return None, "selenium is not installed. Run: pip install selenium"
 
     options = Options()
     options.add_argument("--window-size=500,700")
 
+    # Try multiple ways to get a working Chrome driver
+    driver = None
+    last_error = ""
+
+    # 1. Try webdriver-manager (most reliable, auto-downloads correct version)
     try:
-        driver = webdriver.Chrome(options=options)
+        from webdriver_manager.chrome import ChromeDriverManager
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
     except Exception as e:
-        msg = str(e)
-        if "chromedriver" in msg.lower() or "webdriver" in msg.lower():
-            return None, (
-                "ChromeDriver not found.\n"
-                "Install it via: pip install chromedriver-autoinstaller\n"
-                "or download from https://chromedriver.chromium.org"
-            )
-        return None, f"Could not start Chrome:\n{msg}"
+        last_error = str(e)
+
+    # 2. Fallback: let Selenium's built-in manager try
+    if driver is None:
+        try:
+            driver = webdriver.Chrome(options=options)
+        except Exception as e:
+            last_error = str(e)
+
+    if driver is None:
+        return None, f"Could not start Chrome browser:\n{last_error}"
 
     driver.get(ARCADENET_LOGIN_URL)
 
