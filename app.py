@@ -44,11 +44,12 @@ FONT_FAMILY = "Ubuntu Sans Mono"
 # LCD/Dot-matrix font for title (loaded at runtime)
 _TITLE_FONT_FAMILY = FONT_FAMILY  # fallback until loaded
 
-# Resolve font path relative to app directory
+# Resolve font/asset paths (PyInstaller extracts data to sys._MEIPASS)
 if getattr(sys, "frozen", False):
-    _FONT_DIR = Path(sys.executable).parent / "fonts"
+    _ASSET_DIR = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
 else:
-    _FONT_DIR = Path(__file__).parent / "fonts"
+    _ASSET_DIR = Path(__file__).parent
+_FONT_DIR = _ASSET_DIR / "fonts"
 
 _TITLE_FONT_BOLD = _FONT_DIR / "DSEG14Classic-Bold.ttf"
 _TITLE_FONT_REGULAR = _FONT_DIR / "DSEG14Classic-Regular.ttf"
@@ -509,7 +510,7 @@ class PinballScoresApp:
         self.root.configure(bg=BG_DARK)
 
         # App icon
-        _icon_path = _APP_DIR / "icon.png"
+        _icon_path = _ASSET_DIR / "icon.png"
         if _icon_path.exists():
             try:
                 _icon_img = ImageTk.PhotoImage(Image.open(_icon_path))
