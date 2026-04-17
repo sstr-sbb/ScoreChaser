@@ -355,30 +355,32 @@ def save_settings(settings: dict) -> None:
         json.dump(settings, f, ensure_ascii=False, indent=2)
 
 
-def login_via_browser() -> str | None:
+def login_via_browser() -> tuple[str | None, str | None]:
     """Open a browser window for ATGames login and return the JWT token.
 
-    Returns the token string on success, or None if the user closed the window
-    without logging in.
+    Returns (token, error) — token string on success, or (None, error_message)
+    on failure.
     """
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.chrome.service import Service
     except ImportError:
-        return None
+        return None, "selenium is not installed. Run: pip install selenium"
 
     options = Options()
     options.add_argument("--window-size=500,700")
 
     try:
         driver = webdriver.Chrome(options=options)
-    except Exception:
-        # Try without specifying service (uses PATH)
-        try:
-            driver = webdriver.Chrome(options=options)
-        except Exception:
-            return None
+    except Exception as e:
+        msg = str(e)
+        if "chromedriver" in msg.lower() or "webdriver" in msg.lower():
+            return None, (
+                "ChromeDriver not found.\n"
+                "Install it via: pip install chromedriver-autoinstaller\n"
+                "or download from https://chromedriver.chromium.org"
+            )
+        return None, f"Could not start Chrome:\n{msg}"
 
     driver.get(ARCADENET_LOGIN_URL)
 
@@ -387,7 +389,6 @@ def login_via_browser() -> str | None:
         # Poll localStorage for the token (set after successful login)
         while True:
             try:
-                # Check if window was closed
                 _ = driver.window_handles
             except Exception:
                 break
@@ -407,7 +408,9 @@ def login_via_browser() -> str | None:
         except Exception:
             pass
 
-    return token
+    if token:
+        return token, None
+    return None, None  # User closed the window without logging in
 
 
 def get_token_expiry(token: str) -> float | None:

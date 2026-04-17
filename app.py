@@ -639,12 +639,12 @@ class PinballScoresApp:
         self.login_status.config(text="Logging in...", fg=NEON_YELLOW)
 
         def do_login():
-            token = login_via_browser()
-            self.root.after(0, lambda: self._on_login_done(token))
+            token, error = login_via_browser()
+            self.root.after(0, lambda: self._on_login_done(token, error))
 
         threading.Thread(target=do_login, daemon=True).start()
 
-    def _on_login_done(self, token: str | None):
+    def _on_login_done(self, token: str | None, error: str | None):
         """Called when login browser window closes."""
         self.login_btn.config(state=tk.NORMAL)
         if token and is_token_valid(token):
@@ -654,9 +654,11 @@ class PinballScoresApp:
             self.login_btn.config(text="LOGOUT")
             self.login_status.config(text=f"✓ {username}", fg=NEON_GREEN)
             self._fetch_personal_scores()
-        else:
+        elif error:
             self.login_status.config(text="Login failed", fg=NEON_PINK)
-            self.root.after(3000, lambda: self.login_status.config(text=""))
+            messagebox.showerror("Login Error", error)
+        else:
+            self.login_status.config(text="", fg=FG_DIM)
 
     def _fetch_personal_scores(self):
         """Fetch personal scores in background."""
