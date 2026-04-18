@@ -130,11 +130,18 @@ def fetch_all_games(progress_callback=None) -> list[dict]:
     return all_games
 
 
-def fetch_scores(internal_number: int, session: requests.Session | None = None) -> list[dict]:
-    """Fetch top 100 scores for a game."""
+def fetch_scores(internal_number: int, session: requests.Session | None = None,
+                  time_range: str | None = None) -> list[dict]:
+    """Fetch top 100 scores for a game.
+
+    time_range: None for all-time, or 'weekly', 'monthly', 'daily'.
+    """
     s = session or SESSION
     url = f"{SCORES_JSON_URL}/{internal_number}"
-    resp = s.get(url)
+    params = {}
+    if time_range:
+        params["timeRange"] = time_range
+    resp = s.get(url, params=params)
     resp.raise_for_status()
     data = resp.json()
 

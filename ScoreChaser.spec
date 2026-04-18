@@ -1,11 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
+import customtkinter
+import os
+
+_ctk_datas = [
+    (os.path.join(os.path.dirname(customtkinter.__file__), 'assets'),
+     'customtkinter/assets'),
+]
 
 a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=[],
-    datas=[('fonts/*.ttf', 'fonts'), ('icon.png', '.')],
-    hiddenimports=['PIL._tkinter_finder',
+    datas=[('fonts/*.ttf', 'fonts'), ('icon.png', '.')] + _ctk_datas,
+    hiddenimports=['PIL._tkinter_finder', 'customtkinter', 'darkdetect',
                    'selenium', 'selenium.webdriver',
                    'selenium.webdriver.chrome', 'selenium.webdriver.chrome.webdriver',
                    'selenium.webdriver.chrome.options', 'selenium.webdriver.chrome.service',
