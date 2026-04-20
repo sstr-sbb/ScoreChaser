@@ -1,6 +1,7 @@
 # ScoreChaser
+for Atgames Pinball
 
-A desktop app for tracking your standings on [ATGames ArcadeNet](https://www.atgames.net/leaderboards/titles) pinball leaderboards. Fetches the top 100 scores for every game, shows your personal rankings (even beyond top 100), surfaces the targets you can realistically chase, and tells you — with a motivating quote — what has changed since your last session.
+A desktop app for tracking your standings on [ATGames ArcadeNet](https://www.atgames.net/leaderboards/titles) pinball leaderboards. Fetches the top 100 scores for every game, shows your personal rankings (even beyond top 100), surfaces the targets you can chase, and tells you what has changed since your last session.
 
 ## Features
 
@@ -10,12 +11,7 @@ A desktop app for tracking your standings on [ATGames ArcadeNet](https://www.atg
 - **Next-Target guidance** — shows what it takes to enter the Top 100 / 50 / 10 or become #1, with exact point gap
 - **Tournaments view** with per-game leaderboards, boxart, and device-aware targets
 - **Score-update popup** — after each refresh, highlights where you improved (score + places), where you were overtaken, and where you entered or fell out of the leaderboard — always paired with a motivational quote
-- **Hardware filter** for device-specific threshold views
 - **Hide games** — right-click a card to hide, manage via the status bar
-- **Canvas-rendered game list** — hundreds of cards without UI lag
-- **Offline caching** — top-100 scores, personal scores, and tournament data are all persisted locally; next start is instant
-- **Parallel scraper** fetches all titles and top-100 scores concurrently
-- **Amber retro theme** with vivid neon accents, Share Tech Mono, and DSEG-inspired title
 
 ## Download
 
