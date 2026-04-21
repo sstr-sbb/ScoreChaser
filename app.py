@@ -30,6 +30,8 @@ else:
     _ASSET_DIR = Path(__file__).parent
 _FONT_DIR = _ASSET_DIR / "fonts"
 
+VERSION = "0.5.0"
+
 # -- Color Scheme (Amber main + vivid colorful accents) --
 BG_DARK = "#080600"
 BG_PANEL = "#100e06"
@@ -274,6 +276,9 @@ class CanvasGameList:
 
     def pack(self, **kwargs):
         self._frame.pack(**kwargs)
+
+    def pack_forget(self):
+        self._frame.pack_forget()
 
     def set_items(self, items: list[dict]):
         """Set items and redraw. Each item dict has keys:
@@ -550,7 +555,9 @@ class ScoreChaserApp:
         self._load_hidden_games()
 
         self._selected_game_id: str | None = None
-        self._current_view = "my"  # "my", "all", or "tournaments"
+        self._current_view = "my"  # "my", "all", "players", or "tournaments"
+        self._selected_player: str | None = None
+        self._ranked_players: list[tuple[str, int]] = []
 
         # Tournament state (hydrate from disk cache)
         _tcache = load_tournaments_cache()
@@ -593,7 +600,7 @@ class ScoreChaserApp:
             anchor="w",
         ).pack(anchor="w")
         ctk.CTkLabel(
-            title_box, text="for ATGames Pinball",
+            title_box, text=f"for ATGames Pinball (v{VERSION})",
             font=(FONT_FAMILY, 10), text_color=FG_DIM,
             anchor="w",
         ).pack(anchor="w", pady=(0, 0))
@@ -627,7 +634,8 @@ class ScoreChaserApp:
         left_header.pack(fill="x", padx=8, pady=(8, 4))
 
         self._view_toggle = ctk.CTkSegmentedButton(
-            left_header, values=["MY GAMES", "ALL GAMES", "TOURNAMENTS"],
+            left_header,
+            values=["MY GAMES", "ALL GAMES", "TOURNAMENTS", "TOP PLAYERS"],
             font=(FONT_FAMILY, 12, "bold"),
             fg_color=BG_DARK, selected_color=AMBER_DIM,
             selected_hover_color=AMBER, unselected_color=BG_CARD,
@@ -649,8 +657,10 @@ class ScoreChaserApp:
             command=lambda _: self._refresh_list(),
         )
         self._sort_combo.pack(side="right")
-        ctk.CTkLabel(left_header, text="Sort:", font=(FONT_FAMILY, 13),
-                     text_color=FG_DIM).pack(side="right", padx=(0, 4))
+        self._sort_label = ctk.CTkLabel(left_header, text="Sort:",
+                                         font=(FONT_FAMILY, 13),
+                                         text_color=FG_DIM)
+        self._sort_label.pack(side="right", padx=(0, 4))
 
         # Game count label
         self._count_label = ctk.CTkLabel(
@@ -667,6 +677,73 @@ class ScoreChaserApp:
             thumb_pool=self._thumb_pool,
         )
         self._game_list.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+
+        # Top Players view (hidden unless active)
+        self._players_frame = ctk.CTkFrame(left, fg_color="transparent")
+
+        players_top = ctk.CTkFrame(self._players_frame, fg_color="transparent")
+        players_top.pack(fill="x", padx=8, pady=(0, 6))
+        self._players_desc = ctk.CTkLabel(
+            players_top,
+            text=("Each Top 100 entry gives (101 − rank) points "
+                  "(#1 = 100, #100 = 1), summed across all games."),
+            font=(FONT_FAMILY, 12), text_color=FG_DIM,
+            wraplength=260, justify="left", anchor="w",
+        )
+        self._players_desc.pack(side="left", fill="x", expand=True)
+        self._show_me_btn = ctk.CTkButton(
+            players_top, text="▸ SHOW ME", width=90, height=26,
+            font=(FONT_FAMILY, 12, "bold"),
+            fg_color=BG_CARD, hover_color=BG_CARD_HOVER,
+            text_color=NEON_ORANGE, command=self._scroll_to_me,
+        )
+        self._show_me_btn.pack(side="right", padx=(8, 0))
+
+        players_wrap = tk.Frame(self._players_frame, bg=BG_PANEL,
+                                 bd=0, highlightthickness=0)
+        players_wrap.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+
+        self._players_text = tk.Text(
+            players_wrap, bg=BG_DARK, fg=FG_DEFAULT,
+            font=(FONT_FAMILY, 14), bd=0, highlightthickness=0,
+            padx=12, pady=6, wrap="none", cursor="arrow",
+            spacing1=3, spacing3=3, tabs="56 300 right",
+            tabstyle="tabular",
+        )
+        # Keep the right tab aligned to the current text widget width
+        self._players_text.bind("<Configure>", self._on_players_resize)
+        players_sb = ctk.CTkScrollbar(
+            players_wrap, command=self._players_text.yview,
+            button_color=AMBER_DIM, button_hover_color=AMBER,
+        )
+        self._players_text.configure(yscrollcommand=players_sb.set)
+        players_sb.pack(side="right", fill="y")
+        self._players_text.pack(side="left", fill="both", expand=True)
+
+        # Card-style row background (like right-side detail rows);
+        # zebra stripes for clearer row separation.
+        self._players_text.tag_configure(
+            "row_a", background=BG_CARD,
+            lmargin1=12, lmargin2=12, rmargin=12,
+            spacing1=8, spacing3=8)
+        self._players_text.tag_configure(
+            "row_b", background=BG_CARD_HOVER,
+            lmargin1=12, lmargin2=12, rmargin=12,
+            spacing1=8, spacing3=8)
+        self._players_text.tag_configure(
+            "top1", foreground=GOLD, font=(FONT_FAMILY, 18, "bold"))
+        self._players_text.tag_configure(
+            "top2", foreground=AMBER_BRIGHT, font=(FONT_FAMILY, 17, "bold"))
+        self._players_text.tag_configure(
+            "top3", foreground=NEON_ORANGE, font=(FONT_FAMILY, 16, "bold"))
+        self._players_text.tag_configure(
+            "top10", foreground=AMBER, font=(FONT_FAMILY, 14, "bold"))
+        self._players_text.tag_configure(
+            "me", foreground=AMBER_BRIGHT, background=BG_CARD_SELECTED,
+            font=(FONT_FAMILY, 14, "bold"))
+        self._players_text.tag_configure(
+            "selected_row", background=BG_CARD_HOVER)
+        self._players_text.bind("<Button-1>", self._on_player_click)
 
         # Right panel
         self._detail_panel = ctk.CTkScrollableFrame(
@@ -973,11 +1050,44 @@ class ScoreChaserApp:
             self._current_view = "my"
         elif value == "ALL GAMES":
             self._current_view = "all"
+        elif value == "TOP PLAYERS":
+            self._current_view = "players"
         else:
             self._current_view = "tournaments"
             if not self._tournaments_loaded:
                 self._load_tournaments()
+        self._update_left_panel_widgets()
         self._refresh_list()
+
+    def _update_left_panel_widgets(self):
+        """Show/hide widgets in the left panel based on current view."""
+        if self._current_view == "players":
+            self._game_list.pack_forget()
+            self._sort_combo.pack_forget()
+            self._sort_label.pack_forget()
+            self._players_frame.pack(fill="both", expand=True,
+                                       padx=4, pady=(0, 4))
+            # Reset selection and clear detail panel
+            self._selected_player = None
+            self._clear_detail_panel("Select a player")
+        else:
+            self._players_frame.pack_forget()
+            self._sort_label.pack(side="right", padx=(0, 4))
+            self._sort_combo.pack(side="right")
+            self._game_list.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+            # Clear any lingering player detail when leaving players view
+            if self._selected_player is not None:
+                self._selected_player = None
+                self._clear_detail_panel("Select a game")
+
+    def _clear_detail_panel(self, placeholder: str = ""):
+        for w in self._detail_panel.winfo_children():
+            w.destroy()
+        if placeholder:
+            ctk.CTkLabel(
+                self._detail_panel, text=placeholder,
+                font=(TITLE_FONT_FAMILY, 16), text_color=FG_DIM,
+            ).pack(pady=40)
 
     # ── Game List ───────────────────────────────────────────────
 
@@ -1367,6 +1477,10 @@ class ScoreChaserApp:
             self._populate_tournament_list()
             return
 
+        if self._current_view == "players":
+            self._populate_players_list()
+            return
+
         personal_map = self._get_personal_map()
         search = get_token_username(self._token).lower() if self._token else ""
 
@@ -1478,6 +1592,249 @@ class ScoreChaserApp:
             self._count_label.configure(text=f"{count} games")
 
         self._update_hidden_btn()
+
+    # ── Top Players View ────────────────────────────────────────
+
+    def _populate_players_list(self):
+        """Rank all players by points earned across Top 100 entries."""
+        totals: dict[str, int] = {}
+        for game in self.data.values():
+            for s in game.get("scores", []):
+                name = s.get("userName", "")
+                rank = s.get("rank")
+                if not name or rank is None:
+                    continue
+                try:
+                    r = int(rank)
+                except (ValueError, TypeError):
+                    continue
+                if 1 <= r <= 100:
+                    totals[name] = totals.get(name, 0) + (101 - r)
+
+        ranked = sorted(totals.items(), key=lambda kv: (-kv[1], kv[0].lower()))
+        self._ranked_players = ranked
+        me = get_token_username(self._token).lower() if self._token else ""
+
+        txt = self._players_text
+        txt.configure(state="normal")
+        txt.delete("1.0", "end")
+        txt.mark_unset("me_mark") if "me_mark" in txt.mark_names() else None
+
+        for i, (name, pts) in enumerate(ranked, 1):
+            pts_str = f"{pts:,}".replace(",", ".")
+            line = f"#{i}\t{name}\t{pts_str}\n"
+
+            row_tag = "row_a" if i % 2 else "row_b"
+            is_me = bool(me) and name.lower() == me
+            if is_me:
+                tags = (row_tag, "me")
+            elif i == 1:
+                tags = (row_tag, "top1")
+            elif i == 2:
+                tags = (row_tag, "top2")
+            elif i == 3:
+                tags = (row_tag, "top3")
+            elif i <= 10:
+                tags = (row_tag, "top10")
+            else:
+                tags = (row_tag,)
+
+            line_start = txt.index("end - 1c")
+            txt.insert("end", line, tags)
+            if is_me:
+                txt.mark_set("me_mark", line_start)
+                txt.mark_gravity("me_mark", "left")
+
+        txt.configure(state="disabled")
+
+        self._show_me_btn.configure(
+            state="normal" if me and "me_mark" in txt.mark_names() else "disabled")
+        self._count_label.configure(text=f"{len(ranked)} players ranked")
+        self._update_hidden_btn()
+
+    def _on_players_resize(self, event):
+        # Right-align points column near the widget's right edge
+        # (account for padx=12 on each side + a few px breathing room)
+        right = max(140, event.width - 24)
+        self._players_text.configure(tabs=f"56 {right} right")
+
+    def _on_player_click(self, event):
+        txt = self._players_text
+        idx = txt.index(f"@{event.x},{event.y}")
+        try:
+            line_no = int(idx.split(".")[0])
+        except (ValueError, IndexError):
+            return
+        # Data starts at line 1 (no header rows)
+        pos = line_no - 1
+        if pos < 0 or pos >= len(self._ranked_players):
+            return
+        name, _pts = self._ranked_players[pos]
+        self._select_player(name, line_no)
+
+    def _select_player(self, name: str, line_no: int):
+        self._selected_player = name
+        txt = self._players_text
+        txt.tag_remove("selected_row", "1.0", "end")
+        # Don't override the "me" row's own background highlight
+        me = get_token_username(self._token).lower() if self._token else ""
+        if not (me and name.lower() == me):
+            txt.tag_add("selected_row", f"{line_no}.0", f"{line_no + 1}.0")
+        self._show_player_detail(name)
+
+    def _show_player_detail(self, name: str):
+        self._clear_detail_panel()
+
+        # Collect all top-100 entries for this player across all games
+        entries = []
+        for gid, game in self.data.items():
+            for s in game.get("scores", []):
+                if s.get("userName", "") == name:
+                    r = s.get("rank")
+                    try:
+                        r_int = int(r) if r is not None else None
+                    except (ValueError, TypeError):
+                        r_int = None
+                    if r_int is not None and 1 <= r_int <= 100:
+                        entries.append((gid, game, s, r_int))
+                        break
+        entries.sort(key=lambda e: e[3])
+
+        total_pts = sum(101 - r for (_, _, _, r) in entries)
+        try:
+            overall_idx = next(
+                i for i, (n, _) in enumerate(self._ranked_players, 1)
+                if n == name)
+        except StopIteration:
+            overall_idx = None
+
+        # Header
+        header = ctk.CTkFrame(self._detail_panel, fg_color="transparent")
+        header.pack(fill="x", padx=12, pady=(12, 4))
+
+        ctk.CTkLabel(
+            header, text=name.upper(),
+            font=(TITLE_FONT_FAMILY, 18), text_color=AMBER,
+            anchor="w",
+        ).pack(fill="x")
+
+        rank_str = f"Overall rank: #{overall_idx}" if overall_idx else ""
+        summary = f"{total_pts:,}".replace(",", ".") + " points"
+        if rank_str:
+            summary = f"{rank_str}   ·   {summary}   ·   {len(entries)} Top-100 entries"
+        else:
+            summary = f"{summary}   ·   {len(entries)} Top-100 entries"
+        ctk.CTkLabel(
+            header, text=summary, font=(FONT_FAMILY, 12),
+            text_color=NEON_YELLOW, anchor="w",
+        ).pack(fill="x", pady=(2, 0))
+
+        ctk.CTkFrame(self._detail_panel, fg_color=NEON_PINK, height=2).pack(
+            fill="x", padx=12, pady=(8, 6))
+
+        ctk.CTkLabel(
+            self._detail_panel, text="▸ RANKINGS",
+            font=(FONT_FAMILY, 14, "bold"), text_color=GOLD, anchor="w",
+        ).pack(fill="x", padx=14, pady=(0, 4))
+
+        # Rows: rank · game · score (click → jump to game)
+        for (gid, game, s, r) in entries:
+            row = ctk.CTkFrame(self._detail_panel, fg_color=BG_CARD,
+                                corner_radius=3, cursor="hand2")
+            row.pack(fill="x", padx=12, pady=1)
+
+            if r == 1:
+                rc = GOLD
+            elif r <= 3:
+                rc = AMBER_BRIGHT
+            elif r <= 10:
+                rc = AMBER
+            else:
+                rc = FG_DEFAULT
+
+            rank_lbl = ctk.CTkLabel(row, text=f"#{r}", width=48,
+                                     font=(FONT_FAMILY, 13, "bold"),
+                                     text_color=rc, anchor="w", cursor="hand2")
+            rank_lbl.pack(side="left", padx=(10, 0), pady=4)
+            name_lbl = ctk.CTkLabel(row, text=game.get("name", "")[:40],
+                                     font=(FONT_FAMILY, 12),
+                                     text_color=FG_DEFAULT, anchor="w",
+                                     cursor="hand2")
+            name_lbl.pack(side="left", fill="x", expand=True, pady=4)
+            score_lbl = ctk.CTkLabel(row,
+                                      text=_format_score(str(s.get("score", "0"))),
+                                      font=(FONT_FAMILY, 12),
+                                      text_color=NEON_YELLOW, anchor="e",
+                                      cursor="hand2")
+            score_lbl.pack(side="right", padx=(0, 12), pady=4)
+
+            for w in [row, rank_lbl, name_lbl, score_lbl]:
+                w.bind("<Button-1>",
+                       lambda e, g=gid: self._jump_to_game(g))
+
+    def _scroll_to_me(self):
+        txt = self._players_text
+        if "me_mark" not in txt.mark_names():
+            return
+        try:
+            idx = txt.index("me_mark")
+            line_no = int(idx.split(".")[0])
+        except Exception:
+            return
+        top_line = max(1, line_no - 6)
+        txt.see(f"{top_line}.0")
+        txt.see("me_mark")
+
+        # Also select the player so the detail panel opens
+        me_lower = get_token_username(self._token).lower() if self._token else ""
+        if not me_lower:
+            return
+        found = next((n for n, _ in self._ranked_players
+                      if n.lower() == me_lower), None)
+        if found:
+            self._select_player(found, line_no)
+
+    def _jump_to_player(self, name: str):
+        """Switch to Top Players view and select the given player."""
+        if not name:
+            return
+        self._view_toggle.set("TOP PLAYERS")
+        self._current_view = "players"
+        self._update_left_panel_widgets()
+        self._populate_players_list()
+
+        target = name.lower()
+        line_no = None
+        for i, (n, _) in enumerate(self._ranked_players, 1):
+            if n.lower() == target:
+                line_no = i  # lines match rank numbers 1:1 now
+                break
+        if line_no is None:
+            self._clear_detail_panel(f"{name} — not in any Top 100")
+            return
+
+        txt = self._players_text
+        top_line = max(1, line_no - 6)
+        txt.see(f"{top_line}.0")
+        txt.see(f"{line_no}.0")
+        # Use the original-cased name from ranked list
+        canonical = next(n for n, _ in self._ranked_players
+                          if n.lower() == target)
+        self._select_player(canonical, line_no)
+
+    def _jump_to_game(self, game_id: str):
+        """Switch to All Games view and select the given game."""
+        if game_id not in self.data:
+            return
+        self._view_toggle.set("ALL GAMES")
+        self._current_view = "all"
+        self._selected_player = None
+        self._update_left_panel_widgets()
+        self._selected_game_id = game_id
+        self._refresh_list()
+        self._show_detail(game_id)
+        # After refresh completes, ensure the card is marked selected
+        self.root.after(80, lambda: self._game_list.set_selected(game_id))
 
     # ── Tournament View ─────────────────────────────────────────
 
@@ -1741,19 +2098,26 @@ class ScoreChaserApp:
                     GOLD if rank == 1 else (
                         NEON_GREEN if isinstance(rank, int) and rank <= 10 else FG_DEFAULT))
 
-                row = ctk.CTkFrame(self._detail_panel, fg_color="transparent")
+                row = ctk.CTkFrame(self._detail_panel, fg_color="transparent",
+                                    cursor="hand2")
                 row.pack(fill="x", padx=16)
                 ctk.CTkLabel(row, text=f"#{rank}", font=(FONT_FAMILY, 12),
-                             text_color=fg, width=40, anchor="e").pack(side="left")
+                             text_color=fg, width=40, anchor="e",
+                             cursor="hand2").pack(side="left")
                 ctk.CTkLabel(row, text=name, font=(FONT_FAMILY, 12),
-                             text_color=fg, width=140, anchor="w").pack(
-                    side="left", padx=(8, 0))
+                             text_color=fg, width=140, anchor="w",
+                             cursor="hand2").pack(side="left", padx=(8, 0))
                 ctk.CTkLabel(row, text=_format_score(score),
                              font=(FONT_FAMILY, 12), text_color=fg,
-                             anchor="e").pack(side="left", padx=(4, 0))
+                             anchor="e", cursor="hand2").pack(side="left", padx=(4, 0))
                 ctk.CTkLabel(row, text=_hw_name(s.get("hardware", "")),
                              font=(FONT_FAMILY, 13), text_color=FG_DIM,
-                             width=80, anchor="e").pack(side="right")
+                             width=80, anchor="e",
+                             cursor="hand2").pack(side="right")
+                if name:
+                    for w in [row] + list(row.winfo_children()):
+                        w.bind("<Button-1>",
+                               lambda e, u=name: self._jump_to_player(u))
 
     # ── Game Selection & Detail ─────────────────────────────────
 
@@ -1923,11 +2287,13 @@ class ScoreChaserApp:
 
         for i, s in enumerate(display_scores):
             rank = s.get("rank", i + 1)
-            is_user = search and search == s.get("userName", "").lower()
+            username = s.get("userName", "")
+            is_user = search and search == username.lower()
             if is_user:
                 user_shown = True
 
-            row = ctk.CTkFrame(self._detail_panel, fg_color="transparent")
+            row = ctk.CTkFrame(self._detail_panel, fg_color="transparent",
+                                cursor="hand2")
             row.pack(fill="x", padx=12, pady=0)
 
             fg = NEON_YELLOW if is_user else (
@@ -1935,39 +2301,52 @@ class ScoreChaserApp:
                     NEON_GREEN if rank <= 10 else FG_DEFAULT))
 
             ctk.CTkLabel(row, text=f"#{rank}", font=(FONT_FAMILY, 12),
-                         text_color=fg, width=40, anchor="e").pack(side="left")
-            ctk.CTkLabel(row, text=s.get("userName", ""), font=(FONT_FAMILY, 12),
-                         text_color=fg, width=130, anchor="w").pack(side="left", padx=(8, 0))
+                         text_color=fg, width=40, anchor="e",
+                         cursor="hand2").pack(side="left")
+            ctk.CTkLabel(row, text=username, font=(FONT_FAMILY, 12),
+                         text_color=fg, width=130, anchor="w",
+                         cursor="hand2").pack(side="left", padx=(8, 0))
             ctk.CTkLabel(row, text=_format_score(s.get("score", "0")),
                          font=(FONT_FAMILY, 12), text_color=fg,
-                         anchor="e").pack(side="left", padx=(4, 0))
+                         anchor="e", cursor="hand2").pack(side="left", padx=(4, 0))
             ctk.CTkLabel(row, text=_hw_name(s.get("hardware", "")),
                          font=(FONT_FAMILY, 13), text_color=FG_DIM,
-                         width=80, anchor="e").pack(side="right")
+                         width=80, anchor="e",
+                         cursor="hand2").pack(side="right")
 
-            # Right-click binding
             for w in [row] + list(row.winfo_children()):
-                w.bind("<Button-3>", lambda e, u=s.get("userName", ""): self._show_lb_menu(e, u))
+                w.bind("<Button-3>",
+                       lambda e, u=username: self._show_lb_menu(e, u))
+                if username:
+                    w.bind("<Button-1>",
+                           lambda e, u=username: self._jump_to_player(u))
 
         # Append user if not shown
         if search and not user_shown and user_entry:
             ctk.CTkLabel(self._detail_panel, text="···",
                          font=(FONT_FAMILY, 12), text_color=FG_DIM).pack(pady=2)
             row = ctk.CTkFrame(self._detail_panel, fg_color=HIGHLIGHT_BG,
-                               corner_radius=4)
+                               corner_radius=4, cursor="hand2")
             row.pack(fill="x", padx=12, pady=2)
 
             overall_r2, device_r2, device_nm2 = self._resolve_user_ranks(
                 game.get("scores", []), user_entry, in_top100, search)
             rank_display = _format_rank_display(overall_r2, device_r2, device_nm2)
             ctk.CTkLabel(row, text=rank_display, font=(FONT_FAMILY, 12, "bold"),
-                         text_color=NEON_YELLOW, anchor="w").pack(side="left", padx=(4, 0))
-            ctk.CTkLabel(row, text=user_entry.get("userName", ""),
+                         text_color=NEON_YELLOW, anchor="w",
+                         cursor="hand2").pack(side="left", padx=(4, 0))
+            user_name = user_entry.get("userName", "")
+            ctk.CTkLabel(row, text=user_name,
                          font=(FONT_FAMILY, 12, "bold"), text_color=NEON_YELLOW,
-                         width=130, anchor="w").pack(side="left", padx=(8, 0))
+                         width=130, anchor="w",
+                         cursor="hand2").pack(side="left", padx=(8, 0))
             ctk.CTkLabel(row, text=_format_score(user_entry.get("score", "0")),
                          font=(FONT_FAMILY, 12, "bold"), text_color=NEON_YELLOW,
-                         anchor="e").pack(side="left", padx=(4, 0))
+                         anchor="e", cursor="hand2").pack(side="left", padx=(4, 0))
+            if user_name:
+                for w in [row] + list(row.winfo_children()):
+                    w.bind("<Button-1>",
+                           lambda e, u=user_name: self._jump_to_player(u))
 
     def _load_time_scores(self, internal_number, period, parent, loading_label):
         def do_fetch():
