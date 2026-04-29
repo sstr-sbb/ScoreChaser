@@ -32,7 +32,7 @@ else:
     _ASSET_DIR = Path(__file__).parent
 _FONT_DIR = _ASSET_DIR / "fonts"
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 # -- Color Scheme (Amber main + vivid colorful accents) --
 BG_DARK = "#080600"
@@ -949,6 +949,8 @@ class ScoreChaserApp:
                     tid = t.get("id")
                     if tid is None or tid in self._tournament_scores_cache:
                         continue
+                    if t.get("status") == "Upcoming":
+                        continue  # no leaderboard yet
                     try:
                         scores = fetch_tournament_scores(tid)
                         self._tournament_scores_cache[tid] = scores
@@ -1330,19 +1332,42 @@ class ScoreChaserApp:
                     break
         return snapshot
 
-    def _compute_changes(self, old: dict, new: dict) -> tuple[list, list]:
+    def _compute_changes(self, old: dict, new: dict,
+                         current_tids: set[int] | None = None
+                         ) -> tuple[list, list]:
         """Return (improvements, overtaken) by diffing old vs new snapshots."""
         improvements = []
         overtaken = []
+        current_tids = current_tids or set()
 
         for gid, new_e in new.items():
-            if gid not in old:
-                continue
-            old_e = old[gid]
-            old_score = old_e.get("score", 0)
+            entry_type = new_e.get("type", "game")
+            tournament_name = new_e.get("tournament_name", "")
             new_score = new_e.get("score", 0)
-            old_rank = old_e.get("rank")
             new_rank = new_e.get("rank")
+
+            old_e = old.get(gid)
+            if old_e is None:
+                # Game entries always exist in old when the user has any score,
+                # so a missing key is uninteresting. Tournament entries only
+                # exist while in Top 50, so a new key means the user just
+                # entered the leaderboard.
+                if entry_type == "tournament" and new_rank is not None:
+                    improvements.append({
+                        "type": entry_type,
+                        "tournament_name": tournament_name,
+                        "name": new_e["name"],
+                        "old_score": 0,
+                        "new_score": new_score,
+                        "score_diff": 0,
+                        "old_rank": None,
+                        "new_rank": new_rank,
+                        "rank_diff": 0,
+                    })
+                continue
+
+            old_score = old_e.get("score", 0)
+            old_rank = old_e.get("rank")
 
             score_diff = new_score - old_score
 
@@ -1357,9 +1382,6 @@ class ScoreChaserApp:
                 rank_improved = True  # entered Top 100
             elif old_rank is not None and new_rank is None:
                 rank_worsened = True  # dropped out
-
-            entry_type = new_e.get("type", "game")
-            tournament_name = new_e.get("tournament_name", "")
 
             if score_diff > 0 or rank_improved:
                 improvements.append({
@@ -1382,6 +1404,31 @@ class ScoreChaserApp:
                     "new_rank": new_rank,
                     "rank_diff": -rank_diff if rank_diff else 0,
                 })
+
+        # Tournament entries that disappeared from `new` ⇒ fell out of Top 50.
+        # Only flag this when the tournament is still being tracked, so that
+        # tournaments dropping out of the API window don't produce noise.
+        for key, old_e in old.items():
+            if key in new:
+                continue
+            if old_e.get("type") != "tournament":
+                continue
+            if old_e.get("rank") is None:
+                continue
+            try:
+                tid = int(key.split(":", 2)[1])
+            except (IndexError, ValueError):
+                continue
+            if tid not in current_tids:
+                continue
+            overtaken.append({
+                "type": "tournament",
+                "tournament_name": old_e.get("tournament_name", ""),
+                "name": old_e.get("name", ""),
+                "old_rank": old_e.get("rank"),
+                "new_rank": None,
+                "rank_diff": 0,
+            })
 
         # Sort: largest score/rank improvements first
         improvements.sort(key=lambda x: (-x["score_diff"], -x["rank_diff"]))
@@ -1406,8 +1453,10 @@ class ScoreChaserApp:
             return
 
         if self._prev_snapshot:
+            current_tids = {t.get("id") for t in self._tournaments
+                            if t.get("id") is not None}
             improvements, overtaken = self._compute_changes(
-                self._prev_snapshot, new_snapshot)
+                self._prev_snapshot, new_snapshot, current_tids)
             if improvements or overtaken:
                 self._show_changes_popup(improvements, overtaken)
 
@@ -1970,11 +2019,15 @@ class ScoreChaserApp:
             return
 
         active_count = 0
+        upcoming_count = 0
         for t in self._tournaments:
             status = t.get("status", "")
             if status == "Active":
                 active_count += 1
                 status_color = NEON_GREEN
+            elif status == "Upcoming":
+                upcoming_count += 1
+                status_color = NEON_YELLOW
             elif status == "Expired":
                 status_color = NEON_PINK
             else:
@@ -1987,7 +2040,10 @@ class ScoreChaserApp:
             tid = t.get("id")
             cached = self._tournament_scores_cache.get(tid, [])
             game_count = len(cached)
-            subtitle = f"{game_count} games" if game_count else ""
+            if status == "Upcoming":
+                subtitle = f"{len(t.get('game_ids') or [])} games" if t.get("game_ids") else "Coming soon"
+            else:
+                subtitle = f"{game_count} games" if game_count else ""
 
             # Boxart of the first game, if available
             boxart_url = ""
@@ -2022,7 +2078,7 @@ class ScoreChaserApp:
                 "dates": dates,
                 "subtitle": subtitle,
                 "user_rank_str": user_rank_str,
-                "accent": NEON_CYAN if status == "Active" else FG_DIM,
+                "accent": NEON_CYAN if status in ("Active", "Upcoming") else FG_DIM,
                 "boxart_url": boxart_url,
                 # Unused but required by canvas code paths
                 "rank_str": "", "score_str": "",
@@ -2034,8 +2090,10 @@ class ScoreChaserApp:
             str(self._selected_tournament_id) if self._selected_tournament_id else None)
 
         total = len(self._tournaments)
-        self._count_label.configure(
-            text=f"{total} tournaments  ·  {active_count} active")
+        parts = [f"{total} tournaments", f"{active_count} active"]
+        if upcoming_count:
+            parts.append(f"{upcoming_count} upcoming")
+        self._count_label.configure(text="  ·  ".join(parts))
         self._update_hidden_btn()
 
     def _show_tournament_detail(self, tournament_id: int):
@@ -2207,7 +2265,7 @@ class ScoreChaserApp:
                 ).pack(fill="x", padx=24, pady=(0, 4))
                 continue
 
-            for s in sorted_scores[:10]:
+            for s in sorted_scores:
                 rank = s.get("rank", "?")
                 name = s.get("userName", "")
                 score = s.get("score", "0")
@@ -2399,9 +2457,9 @@ class ScoreChaserApp:
 
         scores = game["scores"]
 
-        # Show top 20 + user if outside
+        # Show all available scores (Top 100); append user if outside
         user_shown = False
-        display_scores = scores[:20]
+        display_scores = scores
 
         for i, s in enumerate(display_scores):
             rank = s.get("rank", i + 1)

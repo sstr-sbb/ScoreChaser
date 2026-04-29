@@ -250,10 +250,12 @@ def fetch_tournaments() -> list[dict]:
     resp.raise_for_status()
     data = resp.json()
     tournaments = data.get("tournaments", [])
-    # Return only active and recent expired (last 5)
+    # Keep all upcoming + active, plus the 5 most-recent expired
+    upcoming = [t for t in tournaments if t.get("status") == "Upcoming"]
     active = [t for t in tournaments if t.get("status") == "Active"]
     expired = [t for t in tournaments if t.get("status") == "Expired"]
-    return active + expired[:5]
+    expired.sort(key=lambda t: (t.get("end") or ""), reverse=True)
+    return upcoming + active + expired[:5]
 
 
 def _parse_tournament_scores_html(html: str) -> list[dict]:
