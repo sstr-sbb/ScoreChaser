@@ -1,5 +1,12 @@
-"""ScoreChaser - Scraper for ATGames ArcadeNet leaderboards."""
+"""ScoreChaser - Scraper for ATGames ArcadeNet leaderboards.
 
+The leaderboards site is a Next.js app. Game lists come from the JSON API
+under /api/leaderboards; per-game and tournament scores are embedded in the
+React Server Component (RSC) flight payload of their pages, requested with
+an "RSC: 1" header and parsed as JSON.
+"""
+
+import codecs
 import json
 import re
 import string
@@ -7,6 +14,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 import requests
@@ -14,12 +22,12 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BASE_URL = "https://www.atgames.net/leaderboards"
-TITLES_AFTER_URL = f"{BASE_URL}/titles/after"
-SCORES_JSON_URL = f"{BASE_URL}/scores-json"
-TOURNAMENT_LIST_URL = "https://acnet-lb.atgames.net/tournament/list"
+GAMES_API_URL = "https://www.atgames.net/api/leaderboards/games"
+GAME_TOP50_URL = f"{BASE_URL}/device/top50"
+SCHEDULE_URL = f"{BASE_URL}/schedule"
 TOURNAMENT_SCORES_URL = f"{BASE_URL}/highscore/top50"
 
-ARCADENET_BACKEND = "https://www.atgames.net/arcadenet/backend"
+ARCADENET_BACKEND = "https://www.atgames.net/api/arcadenet"
 PERSONAL_SCORES_URL = f"{ARCADENET_BACKEND}/d2d/arcade/v2/leaderboards/personal"
 ARCADENET_LOGIN_URL = "https://www.atgames.net/arcadenet/auth/login"
 
@@ -57,6 +65,45 @@ def _new_session() -> requests.Session:
 SESSION = _new_session()
 
 
+def _fetch_rsc_payload(url: str, session: requests.Session,
+                       params: dict | None = None) -> str:
+    """Fetch a page's RSC flight payload (plain text with embedded JSON).
+
+    Falls back to extracting the payload from the full HTML page if the
+    server ignores the RSC header.
+    """
+    resp = session.get(url, params=params, headers={"RSC": "1", "Accept": "*/*"})
+    resp.raise_for_status()
+    # RSC responses carry no charset header; requests would fall back to latin-1
+    resp.encoding = "utf-8"
+    text = resp.text
+
+    if "<html" in text[:300].lower():
+        chunks = re.findall(
+            r'self\.__next_f\.push\(\[1,"(.*?)"\]\)</script>', text, re.DOTALL)
+        parts = []
+        for c in chunks:
+            try:
+                parts.append(json.loads('"' + c + '"'))
+            except ValueError:
+                parts.append(codecs.decode(c, "unicode_escape"))
+        text = "".join(parts)
+
+    return text
+
+
+def _extract_json_after(payload: str, key: str):
+    """Parse the JSON value following `key` (e.g. '"rankings":') in payload."""
+    idx = payload.find(key)
+    if idx < 0:
+        return None
+    try:
+        value, _ = json.JSONDecoder().raw_decode(payload, idx + len(key))
+        return value
+    except ValueError:
+        return None
+
+
 def _fetch_games_for_prefix(prefix: str, session: requests.Session) -> list[dict]:
     """Fetch all games for a single prefix letter, handling pagination."""
     games = []
@@ -65,18 +112,14 @@ def _fetch_games_for_prefix(prefix: str, session: requests.Session) -> list[dict
     while True:
         params = {
             "after": after,
-            "rule": "AND",
             "prefix": prefix,
-            "order": "",
-            "friends": "",
-            "table": "",
-            "table_rule": "",
-            "keyword": "",
+            "limit": "8",
         }
 
-        resp = session.get(TITLES_AFTER_URL, params=params)
+        resp = session.get(GAMES_API_URL, params=params)
         resp.raise_for_status()
-        batch = resp.json()
+        data = resp.json()
+        batch = data.get("games", []) if isinstance(data, dict) else data
 
         if not batch:
             break
@@ -133,36 +176,37 @@ def fetch_all_games(progress_callback=None) -> list[dict]:
     return all_games
 
 
-def fetch_scores(internal_number: int, session: requests.Session | None = None,
+def fetch_scores(game_id: int, session: requests.Session | None = None,
                   time_range: str | None = None) -> list[dict]:
-    """Fetch top 100 scores for a game.
+    """Fetch top 50 scores for a game (keyed by game_id).
 
-    time_range: None for all-time, or 'weekly', 'monthly', 'daily'.
+    time_range: None for all-time, or 'weekly', 'monthly'.
     """
     s = session or SESSION
-    url = f"{SCORES_JSON_URL}/{internal_number}"
+    url = f"{GAME_TOP50_URL}/{game_id}"
     params = {}
     if time_range:
         params["timeRange"] = time_range
-    resp = s.get(url, params=params)
-    resp.raise_for_status()
-    data = resp.json()
+    payload = _fetch_rsc_payload(url, s, params=params)
+    rankings = _extract_json_after(payload, '"rankings":')
+    if rankings is None:
+        raise ValueError(f"No rankings found for game {game_id}")
 
     return [
         {
             "rank": entry.get("rank"),
-            "userName": entry.get("userName", ""),
-            "signature": entry.get("signature", ""),
+            "userName": entry.get("user_name", ""),
+            "signature": entry.get("signature") or "",
             "score": entry.get("score", "0"),
             "hardware": entry.get("hardware", ""),
-            "createdAt": entry.get("createdAt", ""),
+            "createdAt": entry.get("created_at", ""),
         }
-        for entry in data
+        for entry in rankings
     ]
 
 
 def scrape_all(progress_callback=None) -> dict:
-    """Scrape all games and their top 100 scores using a pipeline.
+    """Scrape all games and their top 50 scores using a pipeline.
 
     Games and scores are fetched concurrently: as soon as a prefix batch of
     games is discovered, their scores are submitted for fetching immediately.
@@ -189,7 +233,7 @@ def scrape_all(progress_callback=None) -> dict:
 
     def _fetch_scores_task(game: dict) -> tuple[dict, list[dict] | None, str | None]:
         try:
-            scores = fetch_scores(game["internal_number"], session=_get_thread_session())
+            scores = fetch_scores(game["game_id"], session=_get_thread_session())
             return game, scores, None
         except Exception as e:
             return game, None, str(e)
@@ -244,80 +288,90 @@ def scrape_all(progress_callback=None) -> dict:
     return all_data
 
 
-def fetch_tournaments() -> list[dict]:
-    """Fetch tournament list from the API."""
-    resp = SESSION.get(TOURNAMENT_LIST_URL)
-    resp.raise_for_status()
-    data = resp.json()
-    tournaments = data.get("tournaments", [])
-    # Keep all upcoming + active, plus the 5 most-recent expired
-    upcoming = [t for t in tournaments if t.get("status") == "Upcoming"]
-    active = [t for t in tournaments if t.get("status") == "Active"]
-    expired = [t for t in tournaments if t.get("status") == "Expired"]
-    expired.sort(key=lambda t: (t.get("end") or ""), reverse=True)
-    return upcoming + active + expired[:5]
+_TOURNAMENT_LINK_RE = re.compile(
+    r'"href":"/leaderboards/highscore/(?:result|top50)/(\d+)"'
+    r'[^{}]*?"children":"((?:[^"\\]|\\.)*)"'
+)
+_MONTHS = "(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+_TOURNAMENT_DATE_RE = re.compile(
+    rf'"({_MONTHS} \d{{1,2}}, \d{{4}}) - ({_MONTHS} \d{{1,2}}, \d{{4}})"'
+)
 
 
-def _parse_tournament_scores_html(html: str) -> list[dict]:
-    """Parse tournament top50 HTML page into structured data per game."""
-    games = []
-    # Split by game items
-    items = re.split(r'<div class="item">', html)
+def _to_iso_date(text: str) -> str:
+    """Convert 'Jul 24, 2026' to '2026-07-24'; pass through on failure."""
+    try:
+        return datetime.strptime(text, "%b %d, %Y").strftime("%Y-%m-%d")
+    except ValueError:
+        return text
 
-    for item in items[1:]:  # skip content before first item
-        # Extract game name from title div
-        name_match = re.search(r'<div class="title"><span>\d+</span>(.*?)</div>', item)
-        game_name = name_match.group(1).strip() if name_match else "Unknown"
 
-        # Extract boxart
-        boxart_match = re.search(r'<img src="(https://assets\.atgames\.net[^"]*)"', item)
-        boxart = boxart_match.group(1) if boxart_match else ""
+def _parse_schedule_tournaments(payload: str, status: str) -> list[dict]:
+    """Parse tournament cards from a schedule page's RSC payload."""
+    links = []
+    seen = set()
+    for m in _TOURNAMENT_LINK_RE.finditer(payload):
+        tid = int(m.group(1))
+        if tid in seen:
+            continue
+        seen.add(tid)
+        try:
+            name = json.loads('"' + m.group(2) + '"')
+        except ValueError:
+            name = m.group(2)
+        links.append({"id": tid, "name": name, "pos": m.start()})
 
-        # Extract score rows from tbody
-        scores = []
-        rows = re.findall(r'<tr>\s*<th scope="row">(\d+)</th>(.*?)</tr>', item, re.DOTALL)
-        for rank_str, row_html in rows:
-            # Username
-            name_m = re.search(r'<td class="td-02"[^>]*>(.*?)</td>', row_html)
-            username = name_m.group(1).strip() if name_m else ""
+    dates = [
+        {"start": _to_iso_date(m.group(1)), "end": _to_iso_date(m.group(2)),
+         "pos": m.start(), "used": False}
+        for m in _TOURNAMENT_DATE_RE.finditer(payload)
+    ]
 
-            # Hardware - check title attribute first, then hidden <b>, then raw text
-            hw = ""
-            hw_m = re.search(r'title="([^"]*)"', row_html)
-            if hw_m:
-                hw = hw_m.group(1)
-            elif re.search(r'<b hidden>(.*?)</b>', row_html):
-                hw = re.search(r'<b hidden>(.*?)</b>', row_html).group(1)
-            else:
-                hw_raw = re.search(r'<td class="td-03"[^>]*>(.*?)</td>', row_html)
-                if hw_raw:
-                    hw = re.sub(r'<[^>]+>', '', hw_raw.group(1)).strip()
-
-            # Initials
-            ini_m = re.search(r'<td class="td-04"[^>]*>(.*?)</td>', row_html)
-            initials = ini_m.group(1).strip() if ini_m else ""
-
-            # Score - last td, remove commas
-            score_m = re.search(
-                r'<td[^>]*>([0-9][0-9,]*)</td>\s*$', row_html, re.DOTALL
-            )
-            score_val = score_m.group(1).replace(",", "") if score_m else "0"
-
-            scores.append({
-                "rank": int(rank_str),
-                "userName": username,
-                "signature": initials,
-                "score": score_val,
-                "hardware": hw,
-            })
-
-        games.append({
-            "name": game_name,
-            "boxart": boxart,
-            "scores": scores,
+    tournaments = []
+    for link in links:
+        # Pair each card's title with the nearest unused date range
+        best = None
+        for d in dates:
+            if d["used"]:
+                continue
+            dist = abs(d["pos"] - link["pos"])
+            if best is None or dist < abs(best["pos"] - link["pos"]):
+                best = d
+        start = end = ""
+        if best:
+            best["used"] = True
+            start, end = best["start"], best["end"]
+        tournaments.append({
+            "id": link["id"],
+            "name": link["name"],
+            "status": status,
+            "start": start,
+            "end": end,
         })
 
-    return games
+    return tournaments
+
+
+def fetch_tournaments() -> list[dict]:
+    """Fetch tournaments from the schedule page (active, upcoming, expired)."""
+    tournaments: list[dict] = []
+    seen: set[int] = set()
+
+    for status_param, status in [("upcoming", "Upcoming"), ("active", "Active"),
+                                  ("expired", "Expired")]:
+        payload = _fetch_rsc_payload(SCHEDULE_URL, SESSION,
+                                     params={"status": status_param})
+        for t in _parse_schedule_tournaments(payload, status):
+            if t["id"] not in seen:
+                seen.add(t["id"])
+                tournaments.append(t)
+
+    # Keep all upcoming + active, plus the 5 most-recent expired
+    upcoming = [t for t in tournaments if t["status"] == "Upcoming"]
+    active = [t for t in tournaments if t["status"] == "Active"]
+    expired = [t for t in tournaments if t["status"] == "Expired"]
+    expired.sort(key=lambda t: (t.get("end") or ""), reverse=True)
+    return upcoming + active + expired[:5]
 
 
 def fetch_tournament_scores(tournament_id: int,
@@ -325,9 +379,33 @@ def fetch_tournament_scores(tournament_id: int,
     """Fetch and parse top50 scores for a tournament."""
     s = session or SESSION
     url = f"{TOURNAMENT_SCORES_URL}/{tournament_id}"
-    resp = s.get(url)
-    resp.raise_for_status()
-    return _parse_tournament_scores_html(resp.text)
+    payload = _fetch_rsc_payload(url, s)
+    raw_games = _extract_json_after(payload, '"games":')
+    if not isinstance(raw_games, list):
+        return []
+
+    games = []
+    for g in raw_games:
+        if not isinstance(g, dict) or "rankings" not in g:
+            continue
+        scores = [
+            {
+                "rank": entry.get("rank"),
+                "userName": entry.get("user_name", ""),
+                "signature": entry.get("signature") or "",
+                "score": entry.get("score", "0"),
+                "hardware": entry.get("hardware", ""),
+                "createdAt": entry.get("created_at", ""),
+            }
+            for entry in (g.get("rankings") or [])
+        ]
+        games.append({
+            "name": g.get("name", "Unknown"),
+            "boxart": g.get("boxart_480w") or g.get("boxart", ""),
+            "scores": scores,
+        })
+
+    return games
 
 
 def save_data(data: dict) -> None:

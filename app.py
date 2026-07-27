@@ -32,7 +32,7 @@ else:
     _ASSET_DIR = Path(__file__).parent
 _FONT_DIR = _ASSET_DIR / "fonts"
 
-VERSION = "0.6.1"
+VERSION = "0.7.0"
 
 # -- Color Scheme (Amber main + vivid colorful accents) --
 BG_DARK = "#080600"
@@ -216,7 +216,7 @@ def _compact_score(score_str: str) -> str:
 
 def _format_rank_display(overall: int | None, device: int | None,
                           device_name: str) -> str:
-    """Format rank: '#97 (#23 on Pinball 4K)', '#54' if equal, or '> 100 (...)'."""
+    """Format rank: '#37 (#23 on Pinball 4K)', '#12' if equal, or '> 50 (...)'."""
     if overall is not None and device is not None:
         if overall == device or not device_name:
             return f"#{overall}"
@@ -224,14 +224,13 @@ def _format_rank_display(overall: int | None, device: int | None,
     if overall is not None:
         return f"#{overall}"
     if device is not None and device_name:
-        return f"> 100 (#{device} on {device_name})"
-    return "> 100"
+        return f"> 50 (#{device} on {device_name})"
+    return "> 50"
 
 
 def _get_thresholds(scores: list[dict]) -> dict:
     by_rank = {s["rank"]: s["score"] for s in scores if s.get("rank")}
     return {
-        "top100": by_rank.get(100, ""),
         "top50": by_rank.get(50, ""),
         "top10": by_rank.get(10, ""),
         "high": by_rank.get(1, ""),
@@ -316,11 +315,13 @@ class CanvasGameList:
         self.TEXT_X_NO_IMG = _sf(12)   # text x-offset when no image
         self.TEXT_X_WITH_IMG = _sf(86)  # text x-offset when image present (8 + 68 + 10)
 
-        # Reusable font handle for measuring titles when truncating with "…"
-        # so long names don't wrap onto row 2 / row 3.
+        # Reusable font handles for measuring text when truncating with "…"
+        # so long lines don't wrap onto the next row.
         self._title_font_obj = tkfont.Font(
             family=FONT_FAMILY, size=_sfont(13), weight="bold")
-        self._truncate_cache: dict[tuple[str, int], str] = {}
+        self._subtitle_font_obj = tkfont.Font(
+            family=FONT_FAMILY, size=_sfont(12))
+        self._truncate_cache: dict[tuple, str] = {}
 
         self._on_select = on_select
         self._on_right_click = on_right_click
@@ -368,7 +369,9 @@ class CanvasGameList:
     def set_items(self, items: list[dict]):
         """Set items and redraw. Each item dict has keys:
         gid, name, rank_str, score_str, target, gap_str, progress, accent,
-        boxart_url (optional)"""
+        boxart_url (optional). Tournament items may instead carry
+        boxart_urls (list) plus a synthetic boxart_url cache key — the
+        thumbnail is then composited from center-square crops."""
         self._items = items
         self._hover_idx = -1
         self._redraw()
@@ -396,16 +399,17 @@ class CanvasGameList:
             return x0 + self.TEXT_X_WITH_IMG
         return x0 + self.TEXT_X_NO_IMG
 
-    def _truncate_title(self, text: str, max_width: int) -> str:
+    def _truncate_title(self, text: str, max_width: int,
+                        font: tkfont.Font | None = None) -> str:
         """Trim text with an ellipsis until it fits in max_width pixels at
-        the title font. Cached because _redraw runs on every resize/scroll."""
+        the given font. Cached because _redraw runs on every resize/scroll."""
         if not text:
             return ""
-        key = (text, max_width)
+        font = font or self._title_font_obj
+        key = (text, max_width, str(font))
         cached = self._truncate_cache.get(key)
         if cached is not None:
             return cached
-        font = self._title_font_obj
         if font.measure(text) <= max_width:
             self._truncate_cache[key] = text
             return text
@@ -443,12 +447,13 @@ class CanvasGameList:
             )
             self._card_rects[i] = rect
 
-            # Boxart thumbnail (if cached)
+            # Boxart thumbnail (if cached) — centered vertically in the card
             url = item.get("boxart_url", "")
             if url and url in self._photo_cache:
+                photo = self._photo_cache[url]
+                y_img = y + max(_sf(8), (self.CARD_H - photo.height()) // 2)
                 img_id = self._canvas.create_image(
-                    x0 + _sf(8), y + _sf(8), anchor="nw",
-                    image=self._photo_cache[url],
+                    x0 + _sf(8), y_img, anchor="nw", image=photo,
                 )
                 self._img_canvas_ids[i] = img_id
 
@@ -469,29 +474,31 @@ class CanvasGameList:
             )
 
             if kind == "tournament":
-                # Row 2: Status (colored) + Dates
+                # Row 2: game titles (or fallback subtitle), truncated
+                if item.get("subtitle"):
+                    sub_max = max(x1 - tx - _sf(12), _sf(40))
+                    sub_text = self._truncate_title(
+                        item["subtitle"], sub_max, self._subtitle_font_obj)
+                    self._canvas.create_text(
+                        tx, row2_y, text=sub_text, anchor="nw",
+                        fill=AMBER_DIM, font=(FONT_FAMILY, _sfont(12)),
+                    )
+                # Row 3: Status (colored) + Dates + user's best rank
                 status_text = item.get("status", "")
                 status_color = item.get("status_color", NEON_CYAN)
                 self._canvas.create_text(
-                    tx, row2_y, text=status_text, anchor="nw",
+                    tx, row3_y, text=status_text, anchor="nw",
                     fill=status_color, font=(FONT_FAMILY, _sfont(12), "bold"),
                 )
                 if item.get("dates"):
                     self._canvas.create_text(
-                        tx + _sf(84), row2_y, text=item["dates"], anchor="nw",
+                        tx + _sf(84), row3_y, text=item["dates"], anchor="nw",
                         fill=FG_DEFAULT, font=(FONT_FAMILY, _sfont(12)),
                     )
-                # User's best rank (right-aligned)
                 if item.get("user_rank_str"):
                     self._canvas.create_text(
-                        x1 - right_pad, row2_y, text=item["user_rank_str"], anchor="ne",
+                        x1 - right_pad, row3_y, text=item["user_rank_str"], anchor="ne",
                         fill=NEON_YELLOW, font=(FONT_FAMILY, _sfont(12), "bold"),
-                    )
-                # Row 3: subtitle (e.g. "5 games")
-                if item.get("subtitle"):
-                    self._canvas.create_text(
-                        tx, row3_y, text=item["subtitle"], anchor="nw",
-                        fill=AMBER_DIM, font=(FONT_FAMILY, _sfont(12)),
                     )
             else:
                 # Row 2: Rank (full format) + Gap (right-aligned)
@@ -532,7 +539,11 @@ class CanvasGameList:
             if not url or url in self._photo_cache or url in self._loading_urls:
                 continue
             self._loading_urls.add(url)
-            self._thumb_pool.submit(self._fetch_thumb, url)
+            urls = item.get("boxart_urls") or []
+            if urls:
+                self._thumb_pool.submit(self._fetch_composite, url, urls)
+            else:
+                self._thumb_pool.submit(self._fetch_thumb, url)
 
     def _fetch_thumb(self, url: str):
         """Download and resize a thumbnail (runs in thread pool)."""
@@ -549,6 +560,29 @@ class CanvasGameList:
             self._canvas.after(0, lambda: self._on_thumb_loaded(url, pil))
         except Exception:
             self._loading_urls.discard(url)
+
+    def _fetch_composite(self, key: str, urls: list[str]):
+        """Build a tournament thumbnail from its games' boxarts: a center
+        square crop of each, placed side by side (runs in thread pool)."""
+        try:
+            tiles = []
+            for url in urls:
+                resp = self._http.get(url, timeout=8)
+                resp.raise_for_status()
+                pil = Image.open(io.BytesIO(resp.content)).convert("RGB")
+                side = min(pil.width, pil.height)
+                left = (pil.width - side) // 2
+                top = (pil.height - side) // 2
+                tiles.append(pil.crop((left, top, left + side, top + side)))
+            if not tiles:
+                raise ValueError("no boxarts")
+            tile = max(1, self.THUMB_MAX_W // len(tiles))
+            strip = Image.new("RGB", (tile * len(tiles), tile))
+            for i, t in enumerate(tiles):
+                strip.paste(t.resize((tile, tile), Image.LANCZOS), (i * tile, 0))
+            self._canvas.after(0, lambda: self._on_thumb_loaded(key, strip))
+        except Exception:
+            self._loading_urls.discard(key)
 
     def _on_thumb_loaded(self, url: str, pil_img):
         """Called on main thread when a thumbnail is ready."""
@@ -684,6 +718,7 @@ class ScoreChaserApp:
         }
         self._selected_tournament_id: int | None = None
         self._tournaments_loaded: bool = bool(self._tournaments)
+        self._tournament_section_anchors: dict[int, object] = {}
 
         # Performance: debounce refresh, pool for async work
         self._refresh_pending: str | None = None
@@ -802,8 +837,8 @@ class ScoreChaserApp:
         players_top.pack(fill="x", padx=8, pady=(0, 6))
         self._players_desc = ctk.CTkLabel(
             players_top,
-            text=("Each Top 100 entry gives (101 − rank) points "
-                  "(#1 = 100, #100 = 1), summed across all games."),
+            text=("Each Top 50 entry gives (51 − rank) points "
+                  "(#1 = 50, #50 = 1), summed across all games."),
             font=(FONT_FAMILY, 12), text_color=FG_DIM,
             wraplength=260, justify="left", anchor="w",
         )
@@ -1094,8 +1129,8 @@ class ScoreChaserApp:
         if not self._personal_scores:
             return
         missing = [s for s in self._personal_scores
-                   if str(s.get("game_id", "")) not in self.data
-                   and s.get("internal_number")]
+                   if s.get("game_id")
+                   and str(s.get("game_id", "")) not in self.data]
         if not missing:
             return
 
@@ -1106,11 +1141,11 @@ class ScoreChaserApp:
                 if gid in self.data:
                     continue
                 try:
-                    top = fetch_scores(ps["internal_number"])
+                    top = fetch_scores(ps["game_id"])
                     self.data[gid] = {
                         "name": ps.get("name", "Unknown"),
                         "game_id": ps["game_id"],
-                        "internal_number": ps["internal_number"],
+                        "internal_number": ps.get("internal_number", ""),
                         "boxart": ps.get("boxart_480w") or ps.get("boxart", ""),
                         "scores": top,
                     }
@@ -1228,13 +1263,13 @@ class ScoreChaserApp:
         return pmap
 
     def _resolve_user_ranks(self, scores: list[dict], entry: dict | None,
-                             in_top100: bool, search: str) -> tuple:
+                             in_top50: bool, search: str) -> tuple:
         """Compute (overall_rank, device_rank, device_name) for the user.
 
-        overall_rank: position in the full top-100 leaderboard, or None if
-            the user is beyond top 100.
+        overall_rank: position in the full top-50 leaderboard, or None if
+            the user is beyond top 50.
         device_rank: position among entries sharing the user's hardware
-            group, computed from top 100 when the user is in it, else from
+            group, computed from top 50 when the user is in it, else from
             their personal-score rank (assumed device-specific).
         device_name: friendly hardware group name (e.g. "Pinball 4K").
         """
@@ -1245,10 +1280,10 @@ class ScoreChaserApp:
         device_name = _hw_name(hw_code) if hw_code else ""
         device_group = _HW_GROUPS.get(device_name) if device_name else None
 
-        overall_rank = entry.get("rank") if in_top100 else None
+        overall_rank = entry.get("rank") if in_top50 else None
 
         device_rank = None
-        if in_top100 and device_group and search:
+        if in_top50 and device_group and search:
             same_device = [
                 s for s in scores
                 if s.get("hardware", "") in device_group
@@ -1261,8 +1296,8 @@ class ScoreChaserApp:
                 if s.get("userName", "").lower() == search:
                     device_rank = i + 1
                     break
-        elif not in_top100:
-            # Beyond top 100 — fall back to whatever rank the API gave us
+        elif not in_top50:
+            # Beyond top 50 — fall back to whatever rank the API gave us
             # via personal_scores (expected to be device-specific).
             r = entry.get("rank")
             if isinstance(r, int) and r > 0:
@@ -1284,11 +1319,11 @@ class ScoreChaserApp:
         # Games
         for gid, game in self.data.items():
             entry = None
-            in_top100 = False
+            in_top50 = False
             for s in game.get("scores", []):
                 if search == s.get("userName", "").lower():
                     entry = s
-                    in_top100 = True
+                    in_top50 = True
                     break
             if entry is None and gid in personal_map:
                 entry = personal_map[gid]
@@ -1303,7 +1338,7 @@ class ScoreChaserApp:
                 "type": "game",
                 "name": game.get("name", ""),
                 "score": score,
-                "rank": entry.get("rank") if in_top100 else None,
+                "rank": entry.get("rank") if in_top50 else None,
             }
 
         # Tournaments — one entry per (tournament, game) where user has a score
@@ -1379,7 +1414,7 @@ class ScoreChaserApp:
                 rank_improved = rank_diff > 0
                 rank_worsened = rank_diff < 0
             elif old_rank is None and new_rank is not None:
-                rank_improved = True  # entered Top 100
+                rank_improved = True  # entered Top 50
             elif old_rank is not None and new_rank is None:
                 rank_worsened = True  # dropped out
 
@@ -1496,8 +1531,8 @@ class ScoreChaserApp:
         scroll.pack(fill="both", expand=True, padx=12, pady=(4, 8))
 
         def _ceiling(is_tournament: bool) -> tuple[int, str]:
-            # Leaderboard size — tournaments use Top 50, games use Top 100
-            return (50, "Top 50") if is_tournament else (100, "Top 100")
+            # Leaderboard size — games and tournaments both expose Top 50
+            return (50, "Top 50")
 
         def _header_text(entry) -> tuple[str, str]:
             """Returns (title, subtitle) for a change entry."""
@@ -1597,19 +1632,13 @@ class ScoreChaserApp:
             text_color=BG_DARK, command=dlg.destroy,
         ).pack(pady=(0, 14))
 
-    # Default game tiers (top 100/50/10/#1)
+    # Tiers (top 50/10/#1) — both games and tournaments expose only top 50
     _GAME_TIERS = [
-        (100, "Enter Top 100", "top100"),
         (50, "Enter Top 50", "top50"),
         (10, "Enter Top 10", "top10"),
         (1, "Become #1", "high"),
     ]
-    # Tournament tiers — tournaments expose only top 50
-    _TOURNAMENT_TIERS = [
-        (50, "Enter Top 50", "top50"),
-        (10, "Enter Top 10", "top10"),
-        (1, "Become #1", "high"),
-    ]
+    _TOURNAMENT_TIERS = _GAME_TIERS
 
     def _compute_target(self, user_score: int, thresholds: dict,
                          tiers: list | None = None) -> tuple:
@@ -1659,12 +1688,12 @@ class ScoreChaserApp:
             th = _get_thresholds(game["scores"])
 
             entry = None
-            in_top100 = False
+            in_top50 = False
             if search:
                 for s in game["scores"]:
                     if search == s.get("userName", "").lower():
                         entry = s
-                        in_top100 = True
+                        in_top50 = True
                         break
                 if entry is None and gid in personal_map:
                     entry = personal_map[gid]
@@ -1673,9 +1702,9 @@ class ScoreChaserApp:
                 continue
 
             overall_r, device_r, device_nm = self._resolve_user_ranks(
-                game.get("scores", []), entry, in_top100, search)
+                game.get("scores", []), entry, in_top50, search)
 
-            items.append((gid, game, entry, in_top100, th,
+            items.append((gid, game, entry, in_top50, th,
                           overall_r, device_r, device_nm))
 
         if self._current_view == "my":
@@ -1718,7 +1747,7 @@ class ScoreChaserApp:
         accent_colors = [NEON_PINK, NEON_CYAN, NEON_GREEN, NEON_ORANGE,
                           AMBER_BRIGHT, NEON_YELLOW]
         canvas_items = []
-        for idx, (gid, game, entry, in_top100, th,
+        for idx, (gid, game, entry, in_top50, th,
                   overall_r, device_r, device_nm) in enumerate(items):
             if entry:
                 try:
@@ -1763,7 +1792,7 @@ class ScoreChaserApp:
     # ── Top Players View ────────────────────────────────────────
 
     def _populate_players_list(self):
-        """Rank all players by points earned across Top 100 entries."""
+        """Rank all players by points earned across Top 50 entries."""
         totals: dict[str, int] = {}
         for game in self.data.values():
             for s in game.get("scores", []):
@@ -1775,8 +1804,8 @@ class ScoreChaserApp:
                     r = int(rank)
                 except (ValueError, TypeError):
                     continue
-                if 1 <= r <= 100:
-                    totals[name] = totals.get(name, 0) + (101 - r)
+                if 1 <= r <= 50:
+                    totals[name] = totals.get(name, 0) + (51 - r)
 
         ranked = sorted(totals.items(), key=lambda kv: (-kv[1], kv[0].lower()))
         self._ranked_players = ranked
@@ -1862,12 +1891,12 @@ class ScoreChaserApp:
                         r_int = int(r) if r is not None else None
                     except (ValueError, TypeError):
                         r_int = None
-                    if r_int is not None and 1 <= r_int <= 100:
+                    if r_int is not None and 1 <= r_int <= 50:
                         entries.append((gid, game, s, r_int))
                         break
         entries.sort(key=lambda e: e[3])
 
-        total_pts = sum(101 - r for (_, _, _, r) in entries)
+        total_pts = sum(51 - r for (_, _, _, r) in entries)
         try:
             overall_idx = next(
                 i for i, (n, _) in enumerate(self._ranked_players, 1)
@@ -1977,7 +2006,7 @@ class ScoreChaserApp:
                 line_no = i  # lines match rank numbers 1:1 now
                 break
         if line_no is None:
-            self._clear_detail_panel(f"{name} — not in any Top 100")
+            self._clear_detail_panel(f"{name} — not in any Top 50")
             return
 
         txt = self._players_text
@@ -2039,16 +2068,20 @@ class ScoreChaserApp:
 
             tid = t.get("id")
             cached = self._tournament_scores_cache.get(tid, [])
-            game_count = len(cached)
-            if status == "Upcoming":
+
+            # Second line: the tournament's game titles
+            game_names = [g.get("name", "") for g in cached if g.get("name")]
+            if game_names:
+                subtitle = " · ".join(game_names)
+            elif status == "Upcoming":
                 subtitle = f"{len(t.get('game_ids') or [])} games" if t.get("game_ids") else "Coming soon"
             else:
-                subtitle = f"{game_count} games" if game_count else ""
+                subtitle = ""
 
-            # Boxart of the first game, if available
-            boxart_url = ""
-            if cached:
-                boxart_url = cached[0].get("boxart", "") or ""
+            # Composite thumbnail from all games' boxarts (center squares
+            # side by side); the synthetic key doubles as the cache key.
+            boxart_urls = [g.get("boxart", "") for g in cached if g.get("boxart")]
+            boxart_url = "comp:" + "|".join(boxart_urls) if boxart_urls else ""
 
             # User's best rank across the tournament's games
             user_rank_str = ""
@@ -2080,6 +2113,7 @@ class ScoreChaserApp:
                 "user_rank_str": user_rank_str,
                 "accent": NEON_CYAN if status in ("Active", "Upcoming") else FG_DIM,
                 "boxart_url": boxart_url,
+                "boxart_urls": boxart_urls,
                 # Unused but required by canvas code paths
                 "rank_str": "", "score_str": "",
                 "target": "", "gap_str": "", "target_score": "",
@@ -2159,6 +2193,25 @@ class ScoreChaserApp:
 
         search = get_token_username(self._token).lower() if self._token else ""
 
+        # Thumbnail strip of the tournament's games — click scrolls to
+        # that game's section below. Anchors are filled in the loop.
+        self._tournament_section_anchors = {}
+        strip = ctk.CTkFrame(self._detail_panel, fg_color="transparent")
+        strip.pack(fill="x", padx=12, pady=(0, 6))
+        for gi, g in enumerate(games):
+            thumb = ctk.CTkLabel(strip, text="", width=54, height=54,
+                                 fg_color=BG_DARK, corner_radius=4,
+                                 cursor="hand2")
+            thumb.pack(side="left", padx=(0, 8))
+            if g.get("boxart"):
+                self._load_boxart(g["boxart"], thumb, height=54)
+            thumb.bind(
+                "<Button-1>",
+                lambda e, i=gi: self._scroll_to_tournament_game(i))
+
+        ctk.CTkFrame(self._detail_panel, fg_color=NEON_PINK, height=2).pack(
+            fill="x", padx=8, pady=(0, 6))
+
         for gi, g in enumerate(games):
             game_name = g.get("name", "Unknown")
             boxart_url = g.get("boxart", "") or ""
@@ -2194,6 +2247,7 @@ class ScoreChaserApp:
             # Header: boxart + game name + user status
             header = ctk.CTkFrame(self._detail_panel, fg_color="transparent")
             header.pack(fill="x", padx=12, pady=(4, 4))
+            self._tournament_section_anchors[gi] = header
 
             box = ctk.CTkLabel(header, text="", height=70, width=70,
                                 fg_color=BG_DARK, corner_radius=4)
@@ -2295,6 +2349,23 @@ class ScoreChaserApp:
                         w.bind("<Button-1>",
                                lambda e, u=name: self._jump_to_player(u))
 
+    def _scroll_to_tournament_game(self, gi: int):
+        """Scroll the detail panel so the given game section is at the top."""
+        target = self._tournament_section_anchors.get(gi)
+        if target is None:
+            return
+        try:
+            canvas = self._detail_panel._parent_canvas
+        except AttributeError:
+            return
+        self._detail_panel.update_idletasks()
+        bbox = canvas.bbox("all")
+        total_h = (bbox[3] - bbox[1]) if bbox else 0
+        if total_h <= 0:
+            return
+        y = max(0, target.winfo_y() - _sf(8))
+        canvas.yview_moveto(y / total_h)
+
     # ── Game Selection & Detail ─────────────────────────────────
 
     def _select_game(self, game_id: str):
@@ -2344,19 +2415,19 @@ class ScoreChaserApp:
 
         # User score info
         user_entry = None
-        in_top100 = False
+        in_top50 = False
         if search:
             for s in game["scores"]:
                 if search == s.get("userName", "").lower():
                     user_entry = s
-                    in_top100 = True
+                    in_top50 = True
                     break
             if not user_entry and game_id in personal_map:
                 user_entry = personal_map[game_id]
 
         if user_entry:
             overall_r, device_r, device_nm = self._resolve_user_ranks(
-                game.get("scores", []), user_entry, in_top100, search)
+                game.get("scores", []), user_entry, in_top50, search)
             rank_display = _format_rank_display(overall_r, device_r, device_nm)
 
             ctk.CTkLabel(
@@ -2382,7 +2453,7 @@ class ScoreChaserApp:
                 font=(FONT_FAMILY, 14, "bold"), text_color=NEON_CYAN, anchor="w",
             ).pack(fill="x", padx=12, pady=(0, 4))
 
-            for label, key in [("Top 100", "top100"), ("Top 50", "top50"),
+            for label, key in [("Top 50", "top50"),
                                 ("Top 10", "top10"), ("#1", "high")]:
                 th_val = th.get(key, "")
                 if not th_val:
@@ -2431,8 +2502,8 @@ class ScoreChaserApp:
         time_frame = ctk.CTkFrame(self._detail_panel, fg_color="transparent")
         time_frame.pack(fill="x", padx=12)
 
-        internal = game.get("internal_number", "")
-        if internal:
+        game_id = game.get("game_id", "")
+        if game_id:
             for period, label, color in [("weekly", "▸ THIS WEEK", NEON_GREEN),
                                           ("monthly", "▸ THIS MONTH", NEON_ORANGE)]:
                 section = ctk.CTkFrame(time_frame, fg_color="transparent")
@@ -2443,7 +2514,7 @@ class ScoreChaserApp:
                                         font=(FONT_FAMILY, 13), text_color=FG_DIM,
                                         anchor="w")
                 loading.pack(fill="x")
-                self._load_time_scores(internal, period, section, loading)
+                self._load_time_scores(game_id, period, section, loading)
 
         # Separator
         ctk.CTkFrame(self._detail_panel, fg_color=NEON_PINK, height=2).pack(
@@ -2457,7 +2528,7 @@ class ScoreChaserApp:
 
         scores = game["scores"]
 
-        # Show all available scores (Top 100); append user if outside
+        # Show all available scores (Top 50); append user if outside
         user_shown = False
         display_scores = scores
 
@@ -2506,7 +2577,7 @@ class ScoreChaserApp:
             row.pack(fill="x", padx=12, pady=2)
 
             overall_r2, device_r2, device_nm2 = self._resolve_user_ranks(
-                game.get("scores", []), user_entry, in_top100, search)
+                game.get("scores", []), user_entry, in_top50, search)
             rank_display = _format_rank_display(overall_r2, device_r2, device_nm2)
             ctk.CTkLabel(row, text=rank_display, font=(FONT_FAMILY, 13, "bold"),
                          text_color=NEON_YELLOW, anchor="w",
@@ -2524,10 +2595,10 @@ class ScoreChaserApp:
                     w.bind("<Button-1>",
                            lambda e, u=user_name: self._jump_to_player(u))
 
-    def _load_time_scores(self, internal_number, period, parent, loading_label):
+    def _load_time_scores(self, game_id, period, parent, loading_label):
         def do_fetch():
             try:
-                scores = fetch_scores(internal_number, time_range=period)
+                scores = fetch_scores(game_id, time_range=period)
                 self.root.after(0, lambda: self._display_time_scores(
                     scores, parent, loading_label))
             except Exception:
